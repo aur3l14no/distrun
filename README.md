@@ -116,3 +116,8 @@ scripts/run-docker-tests.sh
 The test covers starting services, fetching logs, detecting missing/orphan
 states after config changes, preserving a running remote service with
 `on_existing: skip`, and stopping a whole project session including orphans.
+
+## License
+
+distrun is licensed under the GNU General Public License v3.0 or later. See
+[LICENSE](LICENSE) for details.
