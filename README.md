@@ -28,16 +28,18 @@ project: myapp
 on_existing: skip # skip | restart
 
 hosts:
-  laptop:
-    local: true
+  local: {}
   web:
     ssh: web-prod
 
 services:
   ui:
-    host: laptop
     cmd: pnpm dev
     cwd: /Users/me/myapp
+
+  watcher:
+    host: local
+    cmd: cargo watch
 
   api:
     host: web
@@ -50,8 +52,11 @@ services:
     stop_timeout: 10s
 ```
 
-Hosts use either `local: true` or `ssh: <target>`. SSH targets are passed to the
-system `ssh` command, so put connection details in your OpenSSH config.
+Local services either omit `host` or use the reserved `host: local`.
+`hosts.local` may be declared as a placeholder for host-level settings, but its
+transport is fixed: it cannot set `ssh`. Remote hosts must set `ssh`, and SSH
+targets are passed to the system `ssh` command, so put connection details in
+your OpenSSH config.
 
 Services are keyed by project, host, and service name.
 

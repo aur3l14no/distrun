@@ -1,4 +1,6 @@
-use crate::model::{DesiredService, HostTarget, HostTransport, OnExisting, Project};
+use crate::model::{
+    DesiredService, HostTarget, HostTransport, LOCAL_HOST_NAME, OnExisting, Project,
+};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -39,14 +41,13 @@ impl From<RawOnExisting> for OnExisting {
 #[derive(Debug, Deserialize)]
 struct RawHost {
     #[serde(default)]
-    local: bool,
-    #[serde(default)]
     ssh: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawService {
-    host: String,
+    #[serde(default)]
+    host: Option<String>,
     cmd: String,
     #[serde(default)]
     cwd: Option<String>,
@@ -78,9 +79,6 @@ fn normalize(raw: RawConfig, project_override: Option<&str>, base_dir: &Path) ->
 
     validate_name("project", &name)?;
 
-    if raw.hosts.is_empty() {
-        bail!("config must define at least one host");
-    }
     if raw.services.is_empty() {
         bail!("config must define at least one service");
     }
@@ -101,11 +99,20 @@ fn normalize(raw: RawConfig, project_override: Option<&str>, base_dir: &Path) ->
     let mut services = BTreeMap::new();
     for (service_name, service) in raw.services {
         validate_name("service", &service_name)?;
-        if !hosts.contains_key(&service.host) {
+        let service_host = service.host.unwrap_or_else(|| LOCAL_HOST_NAME.to_owned());
+
+        if service_host == LOCAL_HOST_NAME {
+            hosts
+                .entry(LOCAL_HOST_NAME.to_owned())
+                .or_insert(HostTarget {
+                    name: LOCAL_HOST_NAME.to_owned(),
+                    transport: HostTransport::Local,
+                });
+        } else if !hosts.contains_key(&service_host) {
             bail!(
                 "service `{}` references unknown host `{}`",
                 service_name,
-                service.host
+                service_host
             );
         }
         let mut env = load_env_files(base_dir, &service.env_file)
@@ -120,7 +127,7 @@ fn normalize(raw: RawConfig, project_override: Option<&str>, base_dir: &Path) ->
             DesiredService {
                 project: name.clone(),
                 name: service_name,
-                host: service.host,
+                host: service_host,
                 cmd: service.cmd,
                 cwd: service.cwd,
                 env,
@@ -138,12 +145,16 @@ fn normalize(raw: RawConfig, project_override: Option<&str>, base_dir: &Path) ->
 }
 
 fn normalize_host_transport(host_name: &str, host: RawHost) -> Result<HostTransport> {
-    match (host.local, host.ssh) {
-        (true, None) => Ok(HostTransport::Local),
-        (false, Some(ssh)) => Ok(HostTransport::Ssh(ssh)),
-        (true, Some(_)) => bail!("host `{host_name}` cannot set both `local: true` and `ssh`"),
-        (false, None) => bail!("host `{host_name}` must set either `local: true` or `ssh`"),
+    if host_name == LOCAL_HOST_NAME {
+        if host.ssh.is_some() {
+            bail!("host `{LOCAL_HOST_NAME}` cannot set `ssh`; local transport is fixed");
+        }
+        return Ok(HostTransport::Local);
     }
+
+    host.ssh
+        .map(HostTransport::Ssh)
+        .with_context(|| format!("host `{host_name}` must set `ssh`"))
 }
 
 fn load_env_files(base_dir: &Path, env_files: &[PathBuf]) -> Result<BTreeMap<String, String>> {
@@ -287,14 +298,15 @@ mod tests {
             &config_path,
             r#"project: demo
 hosts:
-  laptop:
-    local: true
+  local: {}
   web:
     ssh: web-prod
 services:
   ui:
-    host: laptop
     cmd: pnpm dev
+  watcher:
+    host: local
+    cmd: cargo watch
   api:
     host: web
     cmd: ./api
@@ -304,32 +316,67 @@ services:
 
         let project = load(&config_path, None).expect("load config");
 
-        assert_eq!(project.hosts["laptop"].transport, HostTransport::Local);
+        assert_eq!(project.hosts["local"].transport, HostTransport::Local);
         assert_eq!(
             project.hosts["web"].transport,
             HostTransport::Ssh("web-prod".to_owned())
         );
+        assert_eq!(project.services["ui"].host, "local");
         assert_eq!(project.services["ui"].cmd, "pnpm dev");
+        assert_eq!(project.services["watcher"].host, "local");
         assert_eq!(project.services["api"].cmd, "./api");
     }
 
     #[test]
-    fn rejects_hosts_without_a_transport() {
-        let raw = RawHost {
-            local: false,
-            ssh: None,
-        };
+    fn rejects_ssh_on_explicit_local_host() {
+        let dir = std::env::temp_dir().join(format!("distrun-config-{}", unique_id()));
+        fs::create_dir_all(&dir).expect("create temp config dir");
+        let config_path = dir.join("distrun.yml");
+        fs::write(
+            &config_path,
+            r#"project: demo
+hosts:
+  local:
+    ssh: localhost
+services:
+  ui:
+    cmd: pnpm dev
+"#,
+        )
+        .expect("write temp config");
 
-        let error = normalize_host_transport("empty", raw)
-            .expect_err("host without local or ssh should fail");
+        let error = load(&config_path, None).expect_err("local host with ssh should fail");
 
-        assert!(error.to_string().contains("must set either"));
+        assert!(error.to_string().contains("local transport is fixed"));
+    }
+
+    #[test]
+    fn rejects_remote_host_without_ssh() {
+        let dir = std::env::temp_dir().join(format!("distrun-config-{}", unique_id()));
+        fs::create_dir_all(&dir).expect("create temp config dir");
+        let config_path = dir.join("distrun.yml");
+        fs::write(
+            &config_path,
+            r#"project: demo
+hosts:
+  web: {}
+services:
+  api:
+    host: web
+    cmd: ./api
+"#,
+        )
+        .expect("write temp config");
+
+        let error = load(&config_path, None).expect_err("remote host without ssh should fail");
+
+        assert!(error.to_string().contains("must set `ssh`"));
     }
 
     fn unique_id() -> u128 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock before Unix epoch")
-            .as_millis()
+            .as_nanos()
     }
 }

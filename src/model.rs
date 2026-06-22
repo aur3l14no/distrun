@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+pub const LOCAL_HOST_NAME: &str = "local";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub name: String,
