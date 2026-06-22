@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -42,6 +42,51 @@ fn status_all_lists_managed_sessions_from_manual_local_host() {
          local            old                      worker                   exited\n"
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn status_marks_timed_out_host_unavailable_and_keeps_available_hosts() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create fake bin dir");
+    write_status_tmux(&bin_dir);
+    write_slow_ssh(&bin_dir);
+
+    let config_path = dir.join("distrun.yml");
+    fs::write(
+        &config_path,
+        r#"project: demo
+hosts:
+  edge:
+    ssh: edge
+services:
+  api:
+    host: edge
+    cmd: sleep 60
+  db:
+    cmd: sleep 60
+"#,
+    )
+    .expect("write config");
+
+    let started = Instant::now();
+    let output = distrun_with_path(
+        &["-f", path(&config_path), "status", "--timeout", "1500ms"],
+        &bin_dir,
+    );
+
+    assert_success(&output);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stdout,
+        "HOST             SERVICE                  RUNTIME    SPEC\n\
+         edge             api                      -          unavailable\n\
+         local            db                       running    in-sync\n",
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("warning: edge unavailable: command timed out"));
 }
 
 #[test]
@@ -284,6 +329,45 @@ exit 1
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&tmux, permissions).expect("chmod fake tmux");
+}
+
+fn write_status_tmux(bin_dir: &Path) {
+    let tmux = bin_dir.join("tmux");
+    fs::write(
+        &tmux,
+        r#"#!/bin/sh
+if [ "$1" = "has-session" ]; then
+    exit 0
+fi
+if [ "$1" = "list-windows" ] && [ "$2" = "-t" ]; then
+    printf '%s\n' 'distrun_demo|db|0|0'
+    exit 0
+fi
+exit 1
+"#,
+    )
+    .expect("write fake tmux");
+    let mut permissions = fs::metadata(&tmux)
+        .expect("read fake tmux metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&tmux, permissions).expect("chmod fake tmux");
+}
+
+fn write_slow_ssh(bin_dir: &Path) {
+    let ssh = bin_dir.join("ssh");
+    fs::write(
+        &ssh,
+        r#"#!/bin/sh
+sleep 5
+"#,
+    )
+    .expect("write fake ssh");
+    let mut permissions = fs::metadata(&ssh)
+        .expect("read fake ssh metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&ssh, permissions).expect("chmod fake ssh");
 }
 
 fn write_recording_tmux(bin_dir: &Path) {

@@ -5,9 +5,11 @@ use crate::model::{
 use crate::reconcile::reconcile_host;
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
+use std::thread;
 use std::time::Duration;
 
 const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpEvent {
@@ -42,6 +44,30 @@ pub enum ServiceAction {
     Stopped { host: String, service: String },
     NotRunning { host: String, service: String },
     Restarted { host: String, service: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusReport {
+    pub statuses: Vec<ServiceStatus>,
+    pub unavailable_hosts: Vec<UnavailableHost>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusAllReport {
+    pub observed: Vec<ObservedService>,
+    pub unavailable_hosts: Vec<UnavailableHost>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnavailableHost {
+    pub host: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HostObservation {
+    host: String,
+    result: Result<Vec<ObservedService>, String>,
 }
 
 impl UpEvent {
@@ -168,27 +194,60 @@ pub fn down(backend: &impl Backend, project: &Project) -> Result<Vec<DownEvent>>
     Ok(events)
 }
 
-pub fn status(backend: &impl Backend, project: &Project) -> Result<Vec<ServiceStatus>> {
+pub fn status(
+    backend: &(impl Backend + Sync),
+    project: &Project,
+    timeout: Duration,
+) -> Result<StatusReport> {
     let mut statuses = Vec::new();
+    let mut unavailable_hosts = Vec::new();
     // distrun is currently stateless: only hosts in the current config are queried.
     // If a host is removed from distrun.yml, leftover processes on that host are
     // undiscoverable until distrun grows a local state file or remote manifest.
-    for host in project.hosts.values() {
-        let desired = desired_for_host(project, &host.name);
-        let observed = backend.list(host, &project.name)?;
-        statuses.extend(reconcile_host(&host.name, desired.into_values(), observed));
+    for observation in observe_project_hosts(backend, project, timeout) {
+        let desired = desired_for_host(project, &observation.host);
+        match observation.result {
+            Ok(observed) => {
+                statuses.extend(reconcile_host(
+                    &observation.host,
+                    desired.into_values(),
+                    observed,
+                ));
+            }
+            Err(error) => {
+                statuses.extend(unavailable_statuses(
+                    &observation.host,
+                    desired.into_values(),
+                ));
+                unavailable_hosts.push(UnavailableHost {
+                    host: observation.host,
+                    message: error,
+                });
+            }
+        }
     }
 
-    Ok(statuses)
+    Ok(StatusReport {
+        statuses,
+        unavailable_hosts,
+    })
 }
 
-pub fn status_all<'a>(
-    backend: &impl Backend,
+pub fn status_all_with_timeout<'a>(
+    backend: &(impl Backend + Sync),
     hosts: impl IntoIterator<Item = &'a HostTarget>,
-) -> Result<Vec<ObservedService>> {
+    timeout: Duration,
+) -> Result<StatusAllReport> {
     let mut observed = Vec::new();
-    for host in hosts {
-        observed.extend(backend.list_all(host)?);
+    let mut unavailable_hosts = Vec::new();
+    for observation in observe_hosts(hosts, |host| backend.list_all_with_timeout(host, timeout)) {
+        match observation.result {
+            Ok(services) => observed.extend(services),
+            Err(error) => unavailable_hosts.push(UnavailableHost {
+                host: observation.host,
+                message: error,
+            }),
+        }
     }
     observed.sort_by(|left, right| {
         left.host
@@ -197,7 +256,61 @@ pub fn status_all<'a>(
             .then_with(|| left.name.cmp(&right.name))
     });
 
-    Ok(observed)
+    Ok(StatusAllReport {
+        observed,
+        unavailable_hosts,
+    })
+}
+
+fn observe_project_hosts(
+    backend: &(impl Backend + Sync),
+    project: &Project,
+    timeout: Duration,
+) -> Vec<HostObservation> {
+    observe_hosts(project.hosts.values(), |host| {
+        backend.list_with_timeout(host, &project.name, timeout)
+    })
+}
+
+fn observe_hosts<'a>(
+    hosts: impl IntoIterator<Item = &'a HostTarget>,
+    observe: impl Fn(&HostTarget) -> Result<Vec<ObservedService>> + Sync,
+) -> Vec<HostObservation> {
+    let hosts = hosts.into_iter().collect::<Vec<_>>();
+
+    thread::scope(|scope| {
+        hosts
+            .iter()
+            .map(|host| {
+                let observe = &observe;
+                scope.spawn(move || HostObservation {
+                    host: host.name.clone(),
+                    result: observe(host).map_err(|error| format!("{error:#}")),
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(observation) => observation,
+                Err(payload) => std::panic::resume_unwind(payload),
+            })
+            .collect()
+    })
+}
+
+fn unavailable_statuses<'a>(
+    host: &str,
+    desired: impl IntoIterator<Item = &'a DesiredService>,
+) -> Vec<ServiceStatus> {
+    desired
+        .into_iter()
+        .map(|service| ServiceStatus {
+            host: host.to_owned(),
+            service: service.name.clone(),
+            runtime: None,
+            spec: crate::model::SpecState::Unavailable,
+        })
+        .collect()
 }
 
 pub fn logs(

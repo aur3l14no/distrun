@@ -71,6 +71,7 @@ pub enum SpecState {
     InSync,
     Missing,
     Orphan,
+    Unavailable,
 }
 
 impl SpecState {
@@ -79,6 +80,7 @@ impl SpecState {
             Self::InSync => "in-sync",
             Self::Missing => "missing",
             Self::Orphan => "orphan",
+            Self::Unavailable => "unavailable",
         }
     }
 }

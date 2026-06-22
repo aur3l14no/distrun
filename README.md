@@ -95,7 +95,7 @@ See [Interpolation](docs/interpolation.md) for the exact loading layers.
 ## Status
 
 `status` reports runtime state (`running`, `exited`, `unknown`) and config state
-(`in-sync`, `missing`, `orphan`).
+(`in-sync`, `missing`, `orphan`, `unavailable`).
 
 ```text
 HOST             SERVICE                  RUNTIME    SPEC
@@ -107,6 +107,11 @@ edge             worker                   running    orphan
 `status --all` inspects every `distrun_*` tmux session on the configured hosts.
 Use repeated `--host` flags with `status --all` to inspect hosts without loading
 a config file.
+
+Status checks query hosts in parallel and use a per-host timeout, defaulting to
+5 seconds. If a host cannot be observed before the timeout, configured services
+on that host are reported as `unavailable` instead of blocking the whole status
+command or being misreported as `missing`.
 
 ## TUI
 

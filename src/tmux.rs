@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::executor::HostExecutor;
+use crate::executor::{HostExecutor, HostOutput};
 use crate::model::{DesiredService, HostTarget, ObservedService, RuntimeState};
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -25,29 +25,28 @@ where
     E: HostExecutor,
 {
     fn list(&self, host: &HostTarget, project: &str) -> Result<Vec<ObservedService>> {
-        let session = session_name(project);
-        let command = format!(
-            "if {} 2>/dev/null; then {}; fi",
-            tmux(&["has-session", "-t", &session]),
-            tmux(&["list-windows", "-t", &session, "-F", WINDOW_LIST_FORMAT]),
-        );
-        let output = self.executor.run(host, &command)?;
-        let services = parse_window_lines(&host.name, &output.stdout)?;
+        self.list_project_windows(host, project, None)
+    }
 
-        Ok(services
-            .into_iter()
-            .filter(|service| service.project == project)
-            .collect())
+    fn list_with_timeout(
+        &self,
+        host: &HostTarget,
+        project: &str,
+        timeout: Duration,
+    ) -> Result<Vec<ObservedService>> {
+        self.list_project_windows(host, project, Some(timeout))
     }
 
     fn list_all(&self, host: &HostTarget) -> Result<Vec<ObservedService>> {
-        let command = format!(
-            "{} 2>/dev/null || true",
-            tmux(&["list-windows", "-a", "-F", WINDOW_LIST_FORMAT]),
-        );
-        let output = self.executor.run(host, &command)?;
+        self.list_all_windows(host, None)
+    }
 
-        parse_window_lines(&host.name, &output.stdout)
+    fn list_all_with_timeout(
+        &self,
+        host: &HostTarget,
+        timeout: Duration,
+    ) -> Result<Vec<ObservedService>> {
+        self.list_all_windows(host, Some(timeout))
     }
 
     fn start(&self, host: &HostTarget, service: &DesiredService) -> Result<()> {
@@ -147,6 +146,58 @@ where
         Ok(trim_trailing_blank_lines(
             &self.executor.run(host, &command)?.stdout,
         ))
+    }
+}
+
+impl<E> TmuxBackend<E>
+where
+    E: HostExecutor,
+{
+    fn list_project_windows(
+        &self,
+        host: &HostTarget,
+        project: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<ObservedService>> {
+        let session = session_name(project);
+        let command = format!(
+            "if {} 2>/dev/null; then {}; fi",
+            tmux(&["has-session", "-t", &session]),
+            tmux(&["list-windows", "-t", &session, "-F", WINDOW_LIST_FORMAT]),
+        );
+        let output = self.run_observation_command(host, &command, timeout)?;
+        let services = parse_window_lines(&host.name, &output.stdout)?;
+
+        Ok(services
+            .into_iter()
+            .filter(|service| service.project == project)
+            .collect())
+    }
+
+    fn list_all_windows(
+        &self,
+        host: &HostTarget,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<ObservedService>> {
+        let command = format!(
+            "{} 2>/dev/null || true",
+            tmux(&["list-windows", "-a", "-F", WINDOW_LIST_FORMAT]),
+        );
+        let output = self.run_observation_command(host, &command, timeout)?;
+
+        parse_window_lines(&host.name, &output.stdout)
+    }
+
+    fn run_observation_command(
+        &self,
+        host: &HostTarget,
+        command: &str,
+        timeout: Option<Duration>,
+    ) -> Result<HostOutput> {
+        match timeout {
+            Some(timeout) => self.executor.run_with_timeout(host, command, timeout),
+            None => self.executor.run(host, command),
+        }
     }
 }
 

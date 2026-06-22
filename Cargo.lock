@@ -319,6 +319,7 @@ dependencies = [
  "anyhow",
  "clap",
  "expect-test",
+ "libc",
  "ratatui",
  "serde",
  "serde-saphyr",

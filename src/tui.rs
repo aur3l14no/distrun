@@ -63,9 +63,13 @@ fn drain_responses(
             WorkerResponse::Status(result) => {
                 app.status_in_flight = false;
                 match result {
-                    Ok(statuses) => {
-                        app.set_statuses(statuses);
+                    Ok(report) => {
+                        let unavailable_message = unavailable_message(&report.unavailable_hosts);
+                        app.set_statuses(report.statuses);
                         app.status_error = None;
+                        if let Some(message) = unavailable_message {
+                            app.message = message;
+                        }
                         app.request_selected_logs(request_tx);
                     }
                     Err(error) => {
@@ -276,6 +280,7 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn status_style(status: &ServiceStatus) -> Style {
     match (status.runtime, status.spec) {
         (_, SpecState::Missing) => Style::default().fg(Color::Yellow),
+        (_, SpecState::Unavailable) => Style::default().fg(Color::Red),
         (_, SpecState::Orphan) => Style::default().fg(Color::Magenta),
         (Some(RuntimeState::Running), SpecState::InSync) => Style::default().fg(Color::Green),
         (Some(RuntimeState::Exited), _) => Style::default().fg(Color::Red),
@@ -286,6 +291,22 @@ fn status_style(status: &ServiceStatus) -> Style {
 
 fn runtime_label(runtime: Option<RuntimeState>) -> &'static str {
     runtime.map(RuntimeState::as_str).unwrap_or("-")
+}
+
+fn empty_log_text(status: &ServiceStatus) -> &'static str {
+    match status.spec {
+        SpecState::Unavailable => "Host unavailable. Logs cannot be loaded.",
+        SpecState::Missing => "No logs yet. The service is missing.",
+        _ => "No logs captured.",
+    }
+}
+
+fn unavailable_message(hosts: &[ops::UnavailableHost]) -> Option<String> {
+    match hosts {
+        [] => None,
+        [host] => Some(format!("{} unavailable", host.host)),
+        [first, rest @ ..] => Some(format!("{} unavailable (+{} more)", first.host, rest.len())),
+    }
 }
 
 fn spawn_worker(
@@ -299,7 +320,8 @@ fn spawn_worker(
         while let Ok(request) = request_rx.recv() {
             match request {
                 WorkerRequest::Refresh => {
-                    let result = ops::status(&backend, &project).map_err(error_message);
+                    let result = ops::status(&backend, &project, ops::DEFAULT_STATUS_TIMEOUT)
+                        .map_err(error_message);
                     let _ = response_tx.send(WorkerResponse::Status(result));
                 }
                 WorkerRequest::Logs(key) => {
@@ -390,13 +412,14 @@ impl App {
     }
 
     fn request_selected_logs(&mut self, request_tx: &Sender<WorkerRequest>) {
-        let Some((key, runtime)) = self.selected_key_with_runtime() else {
+        let Some(status) = self.selected_status().cloned() else {
             return;
         };
+        let key = ServiceKey::from_status(&status);
 
-        if runtime.is_none() {
+        if status.runtime.is_none() {
             let entry = self.logs.entry(key).or_default();
-            entry.text = "No logs yet. The service is missing.".to_owned();
+            entry.text = empty_log_text(&status).to_owned();
             entry.loading = false;
             entry.error = None;
             return;
@@ -415,10 +438,15 @@ impl App {
         if self.action_in_flight {
             return;
         }
-        let Some((key, _)) = self.selected_key_with_runtime() else {
+        let Some(status) = self.selected_status().cloned() else {
             self.message = "no service selected".to_owned();
             return;
         };
+        if status.spec == SpecState::Unavailable {
+            self.message = format!("{} unavailable", status.host);
+            return;
+        }
+        let key = ServiceKey::from_status(&status);
 
         if request_tx.send(WorkerRequest::Action { kind, key }).is_ok() {
             self.action_in_flight = true;
@@ -494,11 +522,6 @@ impl App {
             .collect()
     }
 
-    fn selected_key_with_runtime(&self) -> Option<(ServiceKey, Option<RuntimeState>)> {
-        self.selected_status()
-            .map(|status| (ServiceKey::from_status(status), status.runtime))
-    }
-
     fn selected_status(&self) -> Option<&ServiceStatus> {
         let indexes = self.filtered_indexes();
         let selected = self.table_state.selected()?;
@@ -522,7 +545,7 @@ impl App {
             Some(entry) if !entry.text.is_empty() => entry.text.clone(),
             Some(entry) if entry.loading => "Loading logs...".to_owned(),
             Some(_) => "No logs captured.".to_owned(),
-            None if status.runtime.is_none() => "No logs yet. The service is missing.".to_owned(),
+            None if status.runtime.is_none() => empty_log_text(status).to_owned(),
             None => "Loading logs...".to_owned(),
         };
 
@@ -566,7 +589,7 @@ enum WorkerRequest {
 }
 
 enum WorkerResponse {
-    Status(Result<Vec<ServiceStatus>, String>),
+    Status(Result<ops::StatusReport, String>),
     Logs {
         key: ServiceKey,
         result: Result<String, String>,

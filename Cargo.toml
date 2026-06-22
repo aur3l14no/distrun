@@ -7,6 +7,7 @@ license = "Apache-2.0"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = { version = "0.0.28", features = ["properties"] }

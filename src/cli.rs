@@ -9,6 +9,7 @@ use crate::tmux::TmuxBackend;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Run processes anywhere, with SSH + tmux.")]
@@ -39,6 +40,13 @@ enum Command {
         all: bool,
         #[arg(long = "host", value_name = "HOST")]
         hosts: Vec<String>,
+        #[arg(
+            long,
+            default_value = "5s",
+            value_parser = parse_cli_duration,
+            help = "Per-host status observation timeout."
+        )]
+        timeout: Duration,
         project: Option<String>,
     },
     Logs {
@@ -80,13 +88,14 @@ pub fn run() -> Result<()> {
     if let Command::Status {
         all: true,
         hosts,
+        timeout,
         project,
     } = &cli.command
     {
         reject_status_all_project(cli.project.as_deref(), project.as_deref())?;
         if !hosts.is_empty() {
             let hosts = manual_hosts(hosts)?;
-            return status_all(&backend, &hosts);
+            return status_all(&backend, &hosts, *timeout);
         }
     }
 
@@ -106,11 +115,11 @@ pub fn run() -> Result<()> {
         Command::Up { .. } => up(&backend, &project),
         Command::Down { .. } => down(&backend, &project),
         Command::Restart { .. } => restart(&backend, &project),
-        Command::Status { all, .. } => {
+        Command::Status { all, timeout, .. } => {
             if all {
-                status_all(&backend, project.hosts.values())
+                status_all(&backend, project.hosts.values(), timeout)
             } else {
-                status(&backend, &project)
+                status(&backend, &project, timeout)
             }
         }
         Command::Logs {
@@ -167,18 +176,25 @@ fn down(backend: &TmuxBackend<SystemExecutor>, project: &Project) -> Result<()> 
     Ok(())
 }
 
-fn status(backend: &TmuxBackend<SystemExecutor>, project: &Project) -> Result<()> {
-    let statuses = ops::status(backend, project)?;
-    print_statuses(&statuses);
+fn status(
+    backend: &TmuxBackend<SystemExecutor>,
+    project: &Project,
+    timeout: Duration,
+) -> Result<()> {
+    let report = ops::status(backend, project, timeout)?;
+    print_statuses(&report.statuses);
+    print_unavailable_hosts(&report.unavailable_hosts);
     Ok(())
 }
 
 fn status_all<'a>(
     backend: &TmuxBackend<SystemExecutor>,
     hosts: impl IntoIterator<Item = &'a HostTarget>,
+    timeout: Duration,
 ) -> Result<()> {
-    let observed = ops::status_all(backend, hosts)?;
-    print_all_statuses(&observed);
+    let report = ops::status_all_with_timeout(backend, hosts, timeout)?;
+    print_all_statuses(&report.observed);
+    print_unavailable_hosts(&report.unavailable_hosts);
     Ok(())
 }
 
@@ -240,4 +256,39 @@ fn print_all_statuses(statuses: &[ObservedService]) {
             status.runtime.as_str()
         );
     }
+}
+
+fn print_unavailable_hosts(hosts: &[ops::UnavailableHost]) {
+    for host in hosts {
+        eprintln!(
+            "warning: {} unavailable: {}",
+            host.host,
+            host.message.trim()
+        );
+    }
+}
+
+fn parse_cli_duration(value: &str) -> std::result::Result<Duration, String> {
+    let duration = if let Some(milliseconds) = value.strip_suffix("ms") {
+        milliseconds
+            .parse::<u64>()
+            .map(Duration::from_millis)
+            .map_err(|_| format!("invalid duration `{value}`"))?
+    } else if let Some(seconds) = value.strip_suffix('s') {
+        seconds
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|_| format!("invalid duration `{value}`"))?
+    } else {
+        value
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map_err(|_| format!("invalid duration `{value}`; use seconds like `5s`"))?
+    };
+
+    if duration.is_zero() {
+        return Err("duration must be greater than zero".to_owned());
+    }
+
+    Ok(duration)
 }
