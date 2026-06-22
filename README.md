@@ -22,20 +22,16 @@ services:
   api:
     host: edge
     cmd: bash -lc 'while true; do echo edge-api $(date +%H:%M:%S) GET /health 200; sleep 1; done'
-    stop_timeout: 1s
 
   worker:
     host: edge
     cmd: bash -lc 'while true; do echo edge-worker job complete; sleep 2; done'
-    stop_timeout: 1s
 
   db:
     cmd: bash -lc 'while true; do echo local-db ready; sleep 2; done'
-    stop_timeout: 1s
 
   ui:
     cmd: bash -lc 'echo local-ui build failed; exit 2'
-    stop_timeout: 1s
 ```
 
 Then run:
