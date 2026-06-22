@@ -88,6 +88,7 @@ specially.
 distrun up
 distrun status
 distrun logs api
+distrun restart
 distrun down
 ```
 
@@ -143,7 +144,8 @@ scripts/run-docker-tests.sh
 
 The test covers starting services, fetching logs, detecting missing/orphan
 states after config changes, preserving a running remote service with
-`on_existing: skip`, and stopping a whole project session including orphans.
+`on_existing: skip`, restarting the project, and stopping a whole project
+session including orphans.
 
 ## License
 

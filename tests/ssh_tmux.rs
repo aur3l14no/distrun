@@ -60,6 +60,27 @@ test             worker                   running    in-sync
         "on_existing: skip should not restart a running service"
     );
 
+    let worker_starts_before_restart = ssh.read_u64(&format!("wc -l < {remote_dir}/worker-starts"));
+    let restart_output = stdout(distrun(&["-f", path(&config_path), "restart"]));
+    expect![[r#"test stopped
+test api started
+test worker started
+"#]]
+    .assert_eq(&restart_output);
+    thread::sleep(Duration::from_secs(1));
+    let starts_after_restart = ssh.read_u64(&format!("wc -l < {remote_dir}/api-starts"));
+    let worker_starts_after_restart = ssh.read_u64(&format!("wc -l < {remote_dir}/worker-starts"));
+    assert_eq!(
+        starts_after + 1,
+        starts_after_restart,
+        "restart should recreate the project services"
+    );
+    assert_eq!(
+        worker_starts_before_restart + 1,
+        worker_starts_after_restart,
+        "restart should recreate every configured project service"
+    );
+
     write_config(
         &config_path,
         &ssh,

@@ -31,6 +31,9 @@ enum Command {
     Down {
         project: Option<String>,
     },
+    Restart {
+        project: Option<String>,
+    },
     Status {
         project: Option<String>,
     },
@@ -49,6 +52,7 @@ pub fn run() -> Result<()> {
         Command::Up { project } | Command::Down { project } | Command::Status { project } => {
             project.as_deref()
         }
+        Command::Restart { project } => project.as_deref(),
         Command::Logs { .. } => None,
     };
     let project_override = merge_project_overrides(cli.project.as_deref(), positional_project)?;
@@ -58,6 +62,7 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Up { .. } => up(&backend, &project),
         Command::Down { .. } => down(&backend, &project),
+        Command::Restart { .. } => restart(&backend, &project),
         Command::Status { .. } => status(&backend, &project),
         Command::Logs {
             service,
@@ -136,6 +141,11 @@ fn up(backend: &impl Backend, project: &Project) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn restart(backend: &impl Backend, project: &Project) -> Result<()> {
+    down(backend, project)?;
+    up(backend, project)
 }
 
 fn down(backend: &impl Backend, project: &Project) -> Result<()> {
