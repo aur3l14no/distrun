@@ -26,6 +26,10 @@ Declare hosts and services in `distrun.yml`:
 ```yaml
 project: myapp
 on_existing: skip # skip | restart
+include:
+  - ./hosts.yml
+  - ./services/api.yml
+include?: ./distrun.local.yml
 
 hosts:
   local: {}
@@ -60,12 +64,23 @@ your OpenSSH config.
 
 Services are keyed by project, host, and service name.
 
-`env_file` paths are local paths resolved relative to `distrun.yml`. Files are
-read before the remote process starts, then sent as environment variables with
-the service command. Later files override earlier files, and inline `env:`
-values override `env_file` values. Supported env file lines are plain
-`KEY=VALUE` entries, blank lines, and comment lines starting with `#`. distrun
-does not treat `export`, quotes, or inline comments specially.
+Use `include` to split config across multiple YAML files. Use `include?` for
+local override files that may not exist. Both fields accept one path or a list
+of paths. Paths are resolved relative to the YAML file that declares them, and
+includes are loaded recursively before the file that included them.
+
+Included files are combined plainly: hosts and services are added to one
+project, and duplicate host or service names are rejected. Put `project` and
+`on_existing` in the root file. If they appear in more than one loaded file, the
+later file wins.
+
+`env_file` paths are local paths resolved relative to the YAML file that defines
+the service. Files are read before the remote process starts, then sent as
+environment variables with the service command. Later files override earlier
+files, and inline `env:` values override `env_file` values. Supported env file
+lines are plain `KEY=VALUE` entries, blank lines, and comment lines starting
+with `#`. distrun does not treat `export`, quotes, or inline comments
+specially.
 
 ## Commands
 

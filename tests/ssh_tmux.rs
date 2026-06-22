@@ -14,9 +14,11 @@ fn manages_remote_services_and_reconciles_config_drift() {
     let remote_dir = format!("/tmp/distrun_{project}");
     let local_dir = env::temp_dir().join(format!("distrun-{project}"));
     fs::create_dir_all(&local_dir).expect("create local test dir");
+    let parts_dir = local_dir.join("parts");
+    fs::create_dir_all(&parts_dir).expect("create config parts dir");
     let config_path = local_dir.join("distrun.yml");
     fs::write(
-        local_dir.join("service.env"),
+        parts_dir.join("service.env"),
         "DISTRUN_TEST_SUFFIX=from-env\n",
     )
     .expect("write env file");
@@ -146,19 +148,34 @@ fn write_config(
     services: &[String],
 ) {
     let services = services.join("\n");
+    let root_dir = path.parent().expect("config path should have parent");
+    let parts_dir = root_dir.join("parts");
+    fs::create_dir_all(&parts_dir).expect("create config parts dir");
     let config = format!(
         r#"project: {project}
 on_existing: {on_existing}
-hosts:
+include:
+  - hosts.yml
+  - parts/services.yml
+include?: distrun.local.yml
+"#,
+    );
+    let hosts = format!(
+        r#"hosts:
   test:
     ssh: {target}
-services:
-{services}
 "#,
         target = ssh.target,
     );
+    let services = format!(
+        r#"services:
+{services}
+"#,
+    );
 
     fs::write(path, config).expect("write config");
+    fs::write(root_dir.join("hosts.yml"), hosts).expect("write hosts config");
+    fs::write(parts_dir.join("services.yml"), services).expect("write services config");
     ssh.run(&format!("mkdir -p {remote_dir}"));
 }
 
