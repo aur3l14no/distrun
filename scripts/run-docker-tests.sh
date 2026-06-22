@@ -60,6 +60,12 @@ for _ in {1..50}; do
     sleep 0.2
 done
 
-PATH="$TMP_DIR/bin:$PATH" \
-DISTRUN_TEST_SSH_TARGET="distrun-test" \
-    cargo test --test ssh_tmux -- --ignored --nocapture
+if [[ "$#" -gt 0 ]]; then
+    PATH="$TMP_DIR/bin:$PATH" \
+    DISTRUN_TEST_SSH_TARGET="distrun-test" \
+        "$@"
+else
+    PATH="$TMP_DIR/bin:$PATH" \
+    DISTRUN_TEST_SSH_TARGET="distrun-test" \
+        cargo test --test ssh_tmux -- --ignored --nocapture
+fi

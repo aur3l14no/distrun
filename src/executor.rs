@@ -1,6 +1,6 @@
 use crate::model::{HostTarget, HostTransport};
 use anyhow::{Context, Result, bail};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug)]
 pub struct HostOutput {
@@ -30,6 +30,7 @@ impl HostExecutor for SystemExecutor {
         };
 
         let output = command
+            .stdin(Stdio::null())
             .output()
             .with_context(|| format!("failed to run command for host `{}`", host.name))?;
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

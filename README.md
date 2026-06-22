@@ -1,98 +1,64 @@
 # distrun
 
-Run groups of processes locally and on remote machines.
+Run a small process stack across your laptop and SSH hosts, then inspect status
+and logs from one terminal. distrun uses `tmux` locally and over SSH, so there is
+no remote daemon to install.
 
-## What It Does
+![distrun TUI screenshot](docs/tui-screenshot.png)
 
-- Starts services from a YAML file.
-- Runs services locally, remotely, or across multiple hosts.
-- Shows status and recent logs.
-- Stops a project gracefully with `distrun down`.
-- Reports services that are missing or left over on configured hosts.
+## Example
 
-## Design
-
-- Uses `tmux` today.
-- Runs local hosts directly and remote hosts over SSH.
-- Does not require a remote daemon.
-- Uses your normal OpenSSH config for ports, keys, proxy jumps, and other SSH
-  options.
-- Has a modular backend design. A `supervisord` backend is planned.
-
-## Config
-
-Declare hosts and services in `distrun.yml`:
+Put this in `distrun.yml`:
 
 ```yaml
-project: myapp
-on_existing: skip # skip | restart
-include:
-  - ./hosts.yml
-  - ./services/api.yml
-include?: ./distrun.local.yml
+project: readme-demo
+on_existing: skip
 
 hosts:
-  local: {}
-  web:
-    ssh: web-prod
+  edge:
+    ssh: edge # any target from your OpenSSH config
 
 services:
-  ui:
-    cmd: pnpm dev
-    cwd: /Users/me/myapp
-
-  watcher:
-    host: local
-    cmd: cargo watch
-
   api:
-    host: web
-    cmd: cargo run --release
-    cwd: /srv/myapp
-    env_file:
-      - ./api.env
-    env:
-      RUST_LOG: info
-    stop_timeout: 10s
+    host: edge
+    cmd: bash -lc 'while true; do echo edge-api $(date +%H:%M:%S) GET /health 200; sleep 1; done'
+    stop_timeout: 1s
+
+  worker:
+    host: edge
+    cmd: bash -lc 'while true; do echo edge-worker job complete; sleep 2; done'
+    stop_timeout: 1s
+
+  db:
+    cmd: bash -lc 'while true; do echo local-db ready; sleep 2; done'
+    stop_timeout: 1s
+
+  ui:
+    cmd: bash -lc 'echo local-ui build failed; exit 2'
+    stop_timeout: 1s
 ```
 
-Local services either omit `host` or use the reserved `host: local`.
-`hosts.local` may be declared as a placeholder for host-level settings, but its
-transport is fixed: it cannot set `ssh`. Remote hosts must set `ssh`, and SSH
-targets are passed to the system `ssh` command, so put connection details in
-your OpenSSH config.
+Then run:
 
-Services are keyed by project, host, and service name.
+```sh
+distrun up
+distrun tui
+```
 
-Use `include` to split config across multiple YAML files. Use `include?` for
-local override files that may not exist. Both fields accept one path or a list
-of paths. Paths are resolved relative to the YAML file that declares them, and
-includes are loaded recursively before the file that included them.
+Omit `host` for local services. Set `host` to a named entry under `hosts` for a
+remote service; the `ssh` value is passed to your system `ssh` command.
 
-Included files are combined plainly: hosts and services are added to one
-project, and duplicate host or service names are rejected. Put `project` and
-`on_existing` in the root file. If they appear in more than one loaded file, the
-later file wins.
+The screenshot above was captured after changing `worker` to `metrics` in the
+config. That puts the important states in one view: a remote service still
+running, a configured service that is missing, an old remote service now marked
+as an orphan, and a local service that exited.
 
-`env_file` paths are local paths resolved relative to the YAML file that defines
-the service. Files are read before the remote process starts, then sent as
-environment variables with the service command. Later files override earlier
-files, and inline `env:` values override `env_file` values. Supported env file
-lines are plain `KEY=VALUE` entries, blank lines, and comment lines starting
-with `#`. distrun does not treat `export`, quotes, or inline comments
-specially.
+To reproduce the README screenshot with the Docker SSH fixture used by the
+integration test:
 
-String values support docker-compose-style interpolation via `serde-saphyr`.
-Config-level values such as `project`, `include`, `include?`, `env_file`, and
-`hosts.*.ssh` resolve from the parent process environment. Service fields
-resolve from the parent process environment plus service environment values,
-except `env_file` paths. Service `env_file` and inline `env:` values win.
-When an `env:` entry references its own key, the raw value does not shadow the
-parent process value or default. See [Interpolation](docs/interpolation.md) for
-the implementation layers.
-Supported forms are `$KEY`, `${KEY}`, `${KEY-default}`, `${KEY:-default}`,
-`${KEY+replacement}`, `${KEY:+replacement}`, `${KEY?error}`, and
-`${KEY:?error}`. Use `$$` to keep a literal dollar sign.
+```sh
+scripts/capture-readme-tui.sh
+```
 
 ## Commands
 
@@ -100,102 +66,91 @@ Supported forms are `$KEY`, `${KEY}`, `${KEY-default}`, `${KEY:-default}`,
 distrun up
 distrun status
 distrun status --all
-distrun status --all --host web-prod --host local
-distrun logs api
+distrun logs api --host edge
 distrun tui
 distrun restart
 distrun down
 ```
 
-`on_existing` controls what `up` does when a service with the same name already
-exists remotely:
+`on_existing: skip` leaves running services alone and recreates only missing or
+exited services. `on_existing: restart` stops and recreates configured services
+when you run `distrun up`.
 
-- `skip`: leave a running service alone; restart only if its `tmux` pane has
-  exited or is missing.
-- `restart`: gracefully stop and recreate the service.
+## Configuration
+
+Use `include` to split config across files, and `include?` for optional local
+overrides:
+
+```yaml
+include:
+  - ./hosts.yml
+  - ./services/api.yml
+include?: ./distrun.local.yml
+```
+
+`env_file` values are read on the machine running distrun, then sent with the
+service command. Later env files override earlier ones, and inline `env:`
+overrides `env_file`.
+
+String values support Docker Compose-style interpolation: `$KEY`, `${KEY}`,
+`${KEY:-default}`, `${KEY:+replacement}`, `${KEY:?error}`, and related forms.
+See [Interpolation](docs/interpolation.md) for the exact loading layers.
 
 ## Status
 
-`status` shows two kinds of state:
-
-- Runtime: `running`, `exited`, or `unknown`.
-- Spec: `in-sync`, `missing`, or `orphan`.
-
-Spec state means:
-
-- `in-sync`: the service is in the config and found remotely.
-- `missing`: the service is in the config but not found remotely.
-- `orphan`: the service is found remotely but not in the config.
-
-Examples:
+`status` reports runtime state (`running`, `exited`, `unknown`) and config state
+(`in-sync`, `missing`, `orphan`).
 
 ```text
 HOST             SERVICE                  RUNTIME    SPEC
-web              api                      running    in-sync
-web              cron                     -          missing
-web              worker                   running    orphan
+edge             api                      running    in-sync
+edge             metrics                  -          missing
+edge             worker                   running    orphan
 ```
 
-Use `status --all` to inspect every `distrun_*` tmux session on the configured
-hosts. Use repeated `--host` flags to inspect manually chosen targets without
-loading a config file; `--host local` checks the local machine, and other values
-are passed to `ssh`.
+`status --all` inspects every `distrun_*` tmux session on the configured hosts.
+Use repeated `--host` flags with `status --all` to inspect hosts without loading
+a config file.
 
 ## TUI
 
-Use `distrun tui` to open an interactive service dashboard for the current
-project. The dashboard shows service status, the selected service's recent logs,
-and a small action footer.
-
-![distrun TUI screenshot](docs/tui-screenshot.png)
-
-To recapture the README screenshot, run:
-
-```sh
-scripts/capture-readme-tui.sh
-```
+`distrun tui` shows the service table, recent logs for the selected service, and
+actions for common repairs.
 
 Controls:
 
 - `up`/`down` or `k`/`j`: select a service.
 - `/`: filter by host, service, runtime, or spec state.
-- `r` or `F5`: reload status and the selected log pane.
 - `s` or `F7`: start the selected configured service.
 - `x` or `F9`: stop the selected running service, including orphans.
 - `Ctrl-R` or `F8`: restart the selected configured service.
 - `q`: quit.
 
-The log pane uses the same backend as `distrun logs`: it captures recent tmux
-pane scrollback for the selected service. The TUI fetches logs only for the
-selected service and keeps the latest fetched tail in memory so the pane does
-not go blank during refreshes. distrun does not persist its own log cache; tmux
-scrollback remains the source of truth.
+The log pane uses the same backend as `distrun logs`: tmux scrollback is the
+source of truth, and distrun does not persist a separate log cache.
 
-## Current Limits
+## Tests
 
-Changing a service cmd, environment, or working directory does not restart a
-running process by itself. distrun does not compare a running `tmux` pane with
-the service config. Use `on_existing: restart`, or run `distrun down` and then
-`distrun up`.
-
-If a service is removed from `distrun.yml` but its host is still configured,
-`status` reports it as `orphan`. If an entire host is removed from `distrun.yml`,
-distrun cannot find processes left behind on that host because it does not keep
-a local state database or a remote project manifest.
-
-## Feature Tests
-
-The integration test uses Docker to start a Debian OpenSSH + tmux target, then
-runs the compiled `distrun` binary against it.
+The integration test starts a Debian OpenSSH + tmux container and runs the
+compiled `distrun` binary against it:
 
 ```sh
 scripts/run-docker-tests.sh
 ```
 
-The test covers starting services, fetching logs, detecting missing/orphan
-states after config changes, preserving a running remote service with
-`on_existing: skip`, restarting the project, and stopping a whole project
-session including orphans.
+It covers remote start, logs, missing/orphan detection after config changes,
+`on_existing: skip`, restart, and project shutdown.
+
+## Current Limitations
+
+distrun does not compare a running tmux pane with the current service command,
+environment, or working directory. Use `on_existing: restart`, `distrun restart`,
+or `distrun down && distrun up` when you want to recreate processes after config
+changes.
+
+If a whole host is removed from the config, distrun cannot discover leftover
+processes on that host because it does not keep a local state database or remote
+manifest.
 
 ## License
 
