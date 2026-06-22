@@ -5,6 +5,9 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 
 const BOOTSTRAP_WINDOW: &str = "__distrun_bootstrap";
+const SESSION_PREFIX: &str = "distrun_";
+const WINDOW_LIST_FORMAT: &str =
+    "#{session_name}|#{@distrun_service}|#{pane_dead}|#{pane_dead_status}";
 
 #[derive(Debug)]
 pub struct TmuxBackend<E> {
@@ -26,23 +29,25 @@ where
         let command = format!(
             "if {} 2>/dev/null; then {}; fi",
             tmux(&["has-session", "-t", &session]),
-            tmux(&[
-                "list-windows",
-                "-t",
-                &session,
-                "-F",
-                "#{@distrun_service}|#{pane_dead}|#{pane_dead_status}",
-            ]),
+            tmux(&["list-windows", "-t", &session, "-F", WINDOW_LIST_FORMAT]),
+        );
+        let output = self.executor.run(host, &command)?;
+        let services = parse_window_lines(&host.name, &output.stdout)?;
+
+        Ok(services
+            .into_iter()
+            .filter(|service| service.project == project)
+            .collect())
+    }
+
+    fn list_all(&self, host: &HostTarget) -> Result<Vec<ObservedService>> {
+        let command = format!(
+            "{} 2>/dev/null || true",
+            tmux(&["list-windows", "-a", "-F", WINDOW_LIST_FORMAT]),
         );
         let output = self.executor.run(host, &command)?;
 
-        output
-            .stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| parse_window_line(project, &host.name, line))
-            .filter_map(Result::transpose)
-            .collect()
+        parse_window_lines(&host.name, &output.stdout)
     }
 
     fn start(&self, host: &HostTarget, service: &DesiredService) -> Result<()> {
@@ -143,8 +148,28 @@ where
     }
 }
 
-fn parse_window_line(project: &str, host: &str, line: &str) -> Result<Option<ObservedService>> {
-    let mut fields = line.splitn(3, '|');
+fn parse_window_lines(host: &str, output: &str) -> Result<Vec<ObservedService>> {
+    let mut services = Vec::new();
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if let Some(service) = parse_window_line(host, line)? {
+            services.push(service);
+        }
+    }
+    Ok(services)
+}
+
+fn parse_window_line(host: &str, line: &str) -> Result<Option<ObservedService>> {
+    let mut fields = line.splitn(4, '|');
+    let session = fields
+        .next()
+        .context("tmux list-windows output is missing session name")?;
+    let Some(project) = session.strip_prefix(SESSION_PREFIX) else {
+        return Ok(None);
+    };
+    if project.is_empty() {
+        return Ok(None);
+    }
+
     let name = fields
         .next()
         .context("tmux list-windows output is missing service name")?;
@@ -154,18 +179,20 @@ fn parse_window_line(project: &str, host: &str, line: &str) -> Result<Option<Obs
         return Ok(None);
     }
 
-    let runtime = match pane_dead {
-        "1" => RuntimeState::Exited,
-        "0" => RuntimeState::Running,
-        _ => RuntimeState::Unknown,
-    };
-
     Ok(Some(ObservedService {
         project: project.to_owned(),
         host: host.to_owned(),
         name: name.to_owned(),
-        runtime,
+        runtime: runtime_state(pane_dead),
     }))
+}
+
+fn runtime_state(pane_dead: &str) -> RuntimeState {
+    match pane_dead {
+        "1" => RuntimeState::Exited,
+        "0" => RuntimeState::Running,
+        _ => RuntimeState::Unknown,
+    }
 }
 
 fn ensure_session(session: &str) -> String {
@@ -230,7 +257,7 @@ fn service_command(service: &DesiredService) -> String {
 }
 
 fn session_name(project: &str) -> String {
-    format!("distrun_{project}")
+    format!("{SESSION_PREFIX}{project}")
 }
 
 fn sleep_duration(duration: Duration) -> String {
@@ -293,5 +320,26 @@ mod tests {
         assert_eq!(sleep_duration(Duration::from_millis(500)), "0.5");
         assert_eq!(sleep_duration(Duration::from_millis(1500)), "1.5");
         assert_eq!(sleep_duration(Duration::from_secs(2)), "2");
+    }
+
+    #[test]
+    fn all_window_parser_keeps_only_distrun_service_windows() {
+        assert_eq!(
+            parse_window_line("web", "distrun_demo|api|0|0").expect("parse managed window"),
+            Some(ObservedService {
+                project: "demo".to_owned(),
+                host: "web".to_owned(),
+                name: "api".to_owned(),
+                runtime: RuntimeState::Running,
+            })
+        );
+        assert_eq!(
+            parse_window_line("web", "manual|api|0|0").expect("parse unmanaged session"),
+            None
+        );
+        assert_eq!(
+            parse_window_line("web", "distrun_demo||0|0").expect("parse unmarked window"),
+            None
+        );
     }
 }

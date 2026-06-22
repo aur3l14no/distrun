@@ -87,6 +87,8 @@ specially.
 ```sh
 distrun up
 distrun status
+distrun status --all
+distrun status --all --host web-prod --host local
 distrun logs api
 distrun restart
 distrun down
@@ -120,6 +122,11 @@ web              api                      running    in-sync
 web              cron                     -          missing
 web              worker                   running    orphan
 ```
+
+Use `status --all` to inspect every `distrun_*` tmux session on the configured
+hosts. Use repeated `--host` flags to inspect manually chosen targets without
+loading a config file; `--host local` checks the local machine, and other values
+are passed to `ssh`.
 
 ## Current Limits
 

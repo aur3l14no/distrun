@@ -5,6 +5,8 @@ use std::time::Duration;
 pub trait Backend {
     fn list(&self, host: &HostTarget, project: &str) -> Result<Vec<ObservedService>>;
 
+    fn list_all(&self, host: &HostTarget) -> Result<Vec<ObservedService>>;
+
     fn start(&self, host: &HostTarget, service: &DesiredService) -> Result<()>;
 
     fn stop_service(

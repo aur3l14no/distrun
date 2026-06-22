@@ -198,10 +198,6 @@ fn normalize(raw: RawConfig, project_override: Option<&str>) -> Result<Project> 
 
     validate_name("project", &name)?;
 
-    if raw.services.is_empty() {
-        bail!("config must define at least one service");
-    }
-
     let mut hosts = BTreeMap::new();
     for (host_name, host) in raw.hosts {
         validate_name("host", &host_name)?;

@@ -1,7 +1,10 @@
 use crate::backend::Backend;
 use crate::config;
 use crate::executor::SystemExecutor;
-use crate::model::{DesiredService, HostTarget, OnExisting, Project, RuntimeState, ServiceStatus};
+use crate::model::{
+    DesiredService, HostTarget, HostTransport, LOCAL_HOST_NAME, ObservedService, OnExisting,
+    Project, RuntimeState, ServiceStatus,
+};
 use crate::reconcile::reconcile_host;
 use crate::tmux::TmuxBackend;
 use anyhow::{Result, bail};
@@ -35,6 +38,10 @@ enum Command {
         project: Option<String>,
     },
     Status {
+        #[arg(long)]
+        all: bool,
+        #[arg(long = "host", value_name = "HOST")]
+        hosts: Vec<String>,
         project: Option<String>,
     },
     Logs {
@@ -48,22 +55,49 @@ enum Command {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let positional_project = match &cli.command {
-        Command::Up { project } | Command::Down { project } | Command::Status { project } => {
-            project.as_deref()
+    let backend = TmuxBackend::new(SystemExecutor);
+
+    if let Command::Status {
+        all: true,
+        hosts,
+        project,
+    } = &cli.command
+    {
+        reject_status_all_project(cli.project.as_deref(), project.as_deref())?;
+        if !hosts.is_empty() {
+            let hosts = manual_hosts(hosts)?;
+            return status_all(&backend, &hosts);
         }
+    }
+
+    if let Command::Status {
+        all: false, hosts, ..
+    } = &cli.command
+        && !hosts.is_empty()
+    {
+        bail!("--host can only be used with status --all");
+    }
+
+    let positional_project = match &cli.command {
+        Command::Up { project } | Command::Down { project } => project.as_deref(),
+        Command::Status { project, .. } => project.as_deref(),
         Command::Restart { project } => project.as_deref(),
         Command::Logs { .. } => None,
     };
     let project_override = merge_project_overrides(cli.project.as_deref(), positional_project)?;
     let project = config::load(&cli.file, project_override)?;
-    let backend = TmuxBackend::new(SystemExecutor);
 
     match cli.command {
         Command::Up { .. } => up(&backend, &project),
         Command::Down { .. } => down(&backend, &project),
         Command::Restart { .. } => restart(&backend, &project),
-        Command::Status { .. } => status(&backend, &project),
+        Command::Status { all, .. } => {
+            if all {
+                status_all(&backend, project.hosts.values())
+            } else {
+                status(&backend, &project)
+            }
+        }
         Command::Logs {
             service,
             host,
@@ -83,6 +117,13 @@ fn merge_project_overrides<'a>(
         (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
         (None, None) => Ok(None),
     }
+}
+
+fn reject_status_all_project(global: Option<&str>, positional: Option<&str>) -> Result<()> {
+    if global.is_some() || positional.is_some() {
+        bail!("status --all cannot be used with a project filter");
+    }
+    Ok(())
 }
 
 fn up(backend: &impl Backend, project: &Project) -> Result<()> {
@@ -171,6 +212,25 @@ fn status(backend: &impl Backend, project: &Project) -> Result<()> {
     Ok(())
 }
 
+fn status_all<'a>(
+    backend: &impl Backend,
+    hosts: impl IntoIterator<Item = &'a HostTarget>,
+) -> Result<()> {
+    let mut observed = Vec::new();
+    for host in hosts {
+        observed.extend(backend.list_all(host)?);
+    }
+    observed.sort_by(|left, right| {
+        left.host
+            .cmp(&right.host)
+            .then_with(|| left.project.cmp(&right.project))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    print_all_statuses(&observed);
+    Ok(())
+}
+
 fn logs(
     backend: &impl Backend,
     project: &Project,
@@ -221,6 +281,27 @@ fn max_stop_timeout(project: &Project, host_name: &str) -> Duration {
         .unwrap_or(Duration::from_secs(10))
 }
 
+fn manual_hosts(hosts: &[String]) -> Result<Vec<HostTarget>> {
+    hosts.iter().map(|host| manual_host(host)).collect()
+}
+
+fn manual_host(host: &str) -> Result<HostTarget> {
+    if host.is_empty() {
+        bail!("--host value cannot be empty");
+    }
+
+    let transport = if host == LOCAL_HOST_NAME {
+        HostTransport::Local
+    } else {
+        HostTransport::Ssh(host.to_owned())
+    };
+
+    Ok(HostTarget {
+        name: host.to_owned(),
+        transport,
+    })
+}
+
 fn print_statuses(statuses: &[ServiceStatus]) {
     println!("{:<16} {:<24} {:<10} SPEC", "HOST", "SERVICE", "RUNTIME");
     for status in statuses {
@@ -231,6 +312,19 @@ fn print_statuses(statuses: &[ServiceStatus]) {
             status.service,
             runtime,
             status.spec.as_str()
+        );
+    }
+}
+
+fn print_all_statuses(statuses: &[ObservedService]) {
+    println!("{:<16} {:<24} {:<24} RUNTIME", "HOST", "PROJECT", "SERVICE");
+    for status in statuses {
+        println!(
+            "{:<16} {:<24} {:<24} {}",
+            status.host,
+            status.project,
+            status.name,
+            status.runtime.as_str()
         );
     }
 }

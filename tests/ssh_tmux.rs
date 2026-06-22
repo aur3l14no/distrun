@@ -48,6 +48,16 @@ test             worker                   running    in-sync
         ],
     );
 
+    let all_status = stdout(distrun(&["-f", path(&config_path), "status", "--all"]));
+    assert_contains(
+        &all_status,
+        &format!("{:<16} {:<24} {:<24} running", "test", project, "api"),
+    );
+    assert_contains(
+        &all_status,
+        &format!("{:<16} {:<24} {:<24} running", "test", project, "worker"),
+    );
+
     let logs = stdout(distrun(&["-f", path(&config_path), "logs", "api"]));
     assert_contains(&logs, "from-env-api-tick");
 
