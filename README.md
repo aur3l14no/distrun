@@ -82,6 +82,18 @@ lines are plain `KEY=VALUE` entries, blank lines, and comment lines starting
 with `#`. distrun does not treat `export`, quotes, or inline comments
 specially.
 
+String values support docker-compose-style interpolation via `serde-saphyr`.
+Config-level values such as `project`, `include`, `include?`, `env_file`, and
+`hosts.*.ssh` resolve from the parent process environment. Service fields
+resolve from the parent process environment plus service environment values,
+except `env_file` paths. Service `env_file` and inline `env:` values win.
+When an `env:` entry references its own key, the raw value does not shadow the
+parent process value or default. See [Interpolation](docs/interpolation.md) for
+the implementation layers.
+Supported forms are `$KEY`, `${KEY}`, `${KEY-default}`, `${KEY:-default}`,
+`${KEY+replacement}`, `${KEY:+replacement}`, `${KEY?error}`, and
+`${KEY:?error}`. Use `$$` to keep a literal dollar sign.
+
 ## Commands
 
 ```sh
@@ -90,6 +102,7 @@ distrun status
 distrun status --all
 distrun status --all --host web-prod --host local
 distrun logs api
+distrun tui
 distrun restart
 distrun down
 ```
@@ -127,6 +140,36 @@ Use `status --all` to inspect every `distrun_*` tmux session on the configured
 hosts. Use repeated `--host` flags to inspect manually chosen targets without
 loading a config file; `--host local` checks the local machine, and other values
 are passed to `ssh`.
+
+## TUI
+
+Use `distrun tui` to open an interactive service dashboard for the current
+project. The dashboard shows service status, the selected service's recent logs,
+and a small action footer.
+
+![distrun TUI screenshot](docs/tui-screenshot.png)
+
+To recapture the README screenshot, run:
+
+```sh
+scripts/capture-readme-tui.sh
+```
+
+Controls:
+
+- `up`/`down` or `k`/`j`: select a service.
+- `/`: filter by host, service, runtime, or spec state.
+- `r` or `F5`: reload status and the selected log pane.
+- `s` or `F7`: start the selected configured service.
+- `x` or `F9`: stop the selected running service, including orphans.
+- `Ctrl-R` or `F8`: restart the selected configured service.
+- `q`: quit.
+
+The log pane uses the same backend as `distrun logs`: it captures recent tmux
+pane scrollback for the selected service. The TUI fetches logs only for the
+selected service and keeps the latest fetched tail in memory so the pane does
+not go blank during refreshes. distrun does not persist its own log cache; tmux
+scrollback remains the source of truth.
 
 ## Current Limits
 

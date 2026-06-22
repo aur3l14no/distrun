@@ -144,7 +144,9 @@ where
             find_target,
             capture_pane,
         );
-        Ok(self.executor.run(host, &command)?.stdout)
+        Ok(trim_trailing_blank_lines(
+            &self.executor.run(host, &command)?.stdout,
+        ))
     }
 }
 
@@ -272,6 +274,15 @@ fn sleep_duration(duration: Duration) -> String {
     format!("{}.{}", duration.as_secs(), fractional)
 }
 
+fn trim_trailing_blank_lines(output: &str) -> String {
+    let trimmed = output.trim_end_matches(|ch: char| ch.is_whitespace());
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
+    }
+}
+
 fn tmux(args: &[&str]) -> String {
     let mut words = Vec::with_capacity(args.len() + 1);
     words.push(sh_quote("tmux"));
@@ -320,6 +331,14 @@ mod tests {
         assert_eq!(sleep_duration(Duration::from_millis(500)), "0.5");
         assert_eq!(sleep_duration(Duration::from_millis(1500)), "1.5");
         assert_eq!(sleep_duration(Duration::from_secs(2)), "2");
+    }
+
+    #[test]
+    fn logs_drop_empty_terminal_area_after_output() {
+        assert_eq!(
+            trim_trailing_blank_lines("api ready\nGET /health 200\n\n\n"),
+            "api ready\nGET /health 200\n"
+        );
     }
 
     #[test]

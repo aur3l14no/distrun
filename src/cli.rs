@@ -1,17 +1,14 @@
-use crate::backend::Backend;
 use crate::config;
 use crate::executor::SystemExecutor;
 use crate::model::{
-    DesiredService, HostTarget, HostTransport, LOCAL_HOST_NAME, ObservedService, OnExisting,
-    Project, RuntimeState, ServiceStatus,
+    HostTarget, HostTransport, LOCAL_HOST_NAME, ObservedService, Project, RuntimeState,
+    ServiceStatus,
 };
-use crate::reconcile::reconcile_host;
+use crate::ops;
 use crate::tmux::TmuxBackend;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Run processes anywhere, with SSH + tmux.")]
@@ -51,6 +48,29 @@ enum Command {
         #[arg(long, default_value_t = 80)]
         tail: usize,
     },
+    #[command(about = "Open the interactive service dashboard.")]
+    Tui {
+        #[arg(
+            long,
+            default_value_t = 80,
+            help = "Log lines to fetch for the selected service."
+        )]
+        tail: usize,
+        project: Option<String>,
+    },
+}
+
+impl Command {
+    fn project_filter(&self) -> Option<&str> {
+        match self {
+            Self::Up { project }
+            | Self::Down { project }
+            | Self::Restart { project }
+            | Self::Status { project, .. }
+            | Self::Tui { project, .. } => project.as_deref(),
+            Self::Logs { .. } => None,
+        }
+    }
 }
 
 pub fn run() -> Result<()> {
@@ -78,13 +98,8 @@ pub fn run() -> Result<()> {
         bail!("--host can only be used with status --all");
     }
 
-    let positional_project = match &cli.command {
-        Command::Up { project } | Command::Down { project } => project.as_deref(),
-        Command::Status { project, .. } => project.as_deref(),
-        Command::Restart { project } => project.as_deref(),
-        Command::Logs { .. } => None,
-    };
-    let project_override = merge_project_overrides(cli.project.as_deref(), positional_project)?;
+    let project_override =
+        merge_project_overrides(cli.project.as_deref(), cli.command.project_filter())?;
     let project = config::load(&cli.file, project_override)?;
 
     match cli.command {
@@ -103,6 +118,7 @@ pub fn run() -> Result<()> {
             host,
             tail,
         } => logs(&backend, &project, &service, host.as_deref(), tail),
+        Command::Tui { tail, .. } => crate::tui::run(project, tail),
     }
 }
 
@@ -126,159 +142,56 @@ fn reject_status_all_project(global: Option<&str>, positional: Option<&str>) -> 
     Ok(())
 }
 
-fn up(backend: &impl Backend, project: &Project) -> Result<()> {
-    for host in project.hosts.values() {
-        let desired = desired_for_host(project, &host.name);
-        let observed = backend.list(host, &project.name)?;
-        let observed_by_name = observed
-            .iter()
-            .map(|service| (service.name.clone(), service.runtime))
-            .collect::<BTreeMap<_, _>>();
-
-        for service in desired.values() {
-            match observed_by_name.get(&service.name).copied() {
-                None => {
-                    backend.start(host, service)?;
-                    println!("{} {} started", host.name, service.name);
-                }
-                Some(RuntimeState::Running) => match project.on_existing {
-                    OnExisting::Skip => {
-                        println!("{} {} skipped", host.name, service.name);
-                    }
-                    OnExisting::Restart => {
-                        backend.stop_service(
-                            host,
-                            &project.name,
-                            &service.name,
-                            service.stop_timeout,
-                        )?;
-                        backend.start(host, service)?;
-                        println!("{} {} restarted", host.name, service.name);
-                    }
-                },
-                Some(RuntimeState::Exited | RuntimeState::Unknown) => {
-                    backend.stop_service(
-                        host,
-                        &project.name,
-                        &service.name,
-                        service.stop_timeout,
-                    )?;
-                    backend.start(host, service)?;
-                    println!("{} {} started", host.name, service.name);
-                }
-            }
-        }
-
-        for observed in observed {
-            if !desired.contains_key(&observed.name) {
-                println!(
-                    "{} {} orphan {}",
-                    host.name,
-                    observed.name,
-                    observed.runtime.as_str()
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn restart(backend: &impl Backend, project: &Project) -> Result<()> {
-    down(backend, project)?;
-    up(backend, project)
-}
-
-fn down(backend: &impl Backend, project: &Project) -> Result<()> {
-    for host in project.hosts.values() {
-        backend.stop_project(host, &project.name, max_stop_timeout(project, &host.name))?;
-        println!("{} stopped", host.name);
+fn up(backend: &TmuxBackend<SystemExecutor>, project: &Project) -> Result<()> {
+    for event in ops::up(backend, project)? {
+        println!("{}", event.line());
     }
     Ok(())
 }
 
-fn status(backend: &impl Backend, project: &Project) -> Result<()> {
-    let mut statuses = Vec::new();
-    // v1 is intentionally stateless: only hosts in the current config are queried.
-    // If a host is removed from distrun.yml, leftover processes on that host are
-    // undiscoverable until distrun grows a local state file or remote manifest.
-    for host in project.hosts.values() {
-        let desired = desired_for_host(project, &host.name);
-        let observed = backend.list(host, &project.name)?;
-        statuses.extend(reconcile_host(&host.name, desired.into_values(), observed));
+fn restart(backend: &TmuxBackend<SystemExecutor>, project: &Project) -> Result<()> {
+    let (down_events, up_events) = ops::restart(backend, project)?;
+    for event in down_events {
+        println!("{} stopped", event.host);
     }
+    for event in up_events {
+        println!("{}", event.line());
+    }
+    Ok(())
+}
 
+fn down(backend: &TmuxBackend<SystemExecutor>, project: &Project) -> Result<()> {
+    for event in ops::down(backend, project)? {
+        println!("{} stopped", event.host);
+    }
+    Ok(())
+}
+
+fn status(backend: &TmuxBackend<SystemExecutor>, project: &Project) -> Result<()> {
+    let statuses = ops::status(backend, project)?;
     print_statuses(&statuses);
     Ok(())
 }
 
 fn status_all<'a>(
-    backend: &impl Backend,
+    backend: &TmuxBackend<SystemExecutor>,
     hosts: impl IntoIterator<Item = &'a HostTarget>,
 ) -> Result<()> {
-    let mut observed = Vec::new();
-    for host in hosts {
-        observed.extend(backend.list_all(host)?);
-    }
-    observed.sort_by(|left, right| {
-        left.host
-            .cmp(&right.host)
-            .then_with(|| left.project.cmp(&right.project))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-
+    let observed = ops::status_all(backend, hosts)?;
     print_all_statuses(&observed);
     Ok(())
 }
 
 fn logs(
-    backend: &impl Backend,
+    backend: &TmuxBackend<SystemExecutor>,
     project: &Project,
     service: &str,
     host_name: Option<&str>,
     tail: usize,
 ) -> Result<()> {
-    let host = match host_name {
-        Some(host_name) => project
-            .hosts
-            .get(host_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown host `{host_name}`"))?,
-        None => host_for_service(project, service)?,
-    };
-    let logs = backend.logs(host, &project.name, service, tail)?;
+    let logs = ops::logs(backend, project, service, host_name, tail)?;
     print!("{logs}");
     Ok(())
-}
-
-fn desired_for_host(project: &Project, host_name: &str) -> BTreeMap<String, DesiredService> {
-    project
-        .services
-        .iter()
-        .filter(|(_, service)| service.host == host_name)
-        .map(|(name, service)| (name.clone(), service.clone()))
-        .collect()
-}
-
-fn host_for_service<'a>(project: &'a Project, service_name: &str) -> Result<&'a HostTarget> {
-    let service = project.services.get(service_name).ok_or_else(|| {
-        anyhow::anyhow!("service `{service_name}` is not in config; pass --host for orphan logs")
-    })?;
-    project.hosts.get(&service.host).ok_or_else(|| {
-        anyhow::anyhow!(
-            "service `{service_name}` references unknown host `{}`",
-            service.host
-        )
-    })
-}
-
-fn max_stop_timeout(project: &Project, host_name: &str) -> Duration {
-    project
-        .services
-        .values()
-        .filter(|service| service.host == host_name)
-        .map(|service| service.stop_timeout)
-        .max()
-        .unwrap_or(Duration::from_secs(10))
 }
 
 fn manual_hosts(hosts: &[String]) -> Result<Vec<HostTarget>> {

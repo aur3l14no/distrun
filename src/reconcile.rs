@@ -1,20 +1,20 @@
 use crate::model::{DesiredService, ObservedService, ServiceStatus, SpecState};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub fn reconcile_host(
+pub fn reconcile_host<'a>(
     host: &str,
-    desired: impl Iterator<Item = DesiredService>,
+    desired: impl Iterator<Item = &'a DesiredService>,
     observed: Vec<ObservedService>,
 ) -> Vec<ServiceStatus> {
     let desired = desired
-        .map(|service| (service.name.clone(), service))
-        .collect::<BTreeMap<_, _>>();
+        .map(|service| service.name.clone())
+        .collect::<BTreeSet<_>>();
     let observed = observed
         .into_iter()
         .map(|service| (service.name.clone(), service))
         .collect::<BTreeMap<_, _>>();
     let names = desired
-        .keys()
+        .iter()
         .chain(observed.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -22,7 +22,7 @@ pub fn reconcile_host(
     names
         .into_iter()
         .map(|service| match observed.get(&service) {
-            Some(observed) if desired.contains_key(&service) => ServiceStatus {
+            Some(observed) if desired.contains(&service) => ServiceStatus {
                 host: host.to_owned(),
                 service,
                 runtime: Some(observed.runtime),
@@ -53,13 +53,13 @@ mod tests {
 
     #[test]
     fn separates_runtime_from_spec_state() {
-        let desired = vec![desired("api"), desired("cron")];
+        let desired = [desired("api"), desired("cron")];
         let observed = vec![
             observed("api", RuntimeState::Running),
             observed("worker", RuntimeState::Running),
         ];
 
-        let statuses = reconcile_host("web", desired.into_iter(), observed);
+        let statuses = reconcile_host("web", desired.iter(), observed);
 
         assert_eq!(
             statuses,
