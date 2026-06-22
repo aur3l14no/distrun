@@ -1,4 +1,4 @@
-use crate::model::{DesiredService, HostTarget, OnExisting, Project};
+use crate::model::{DesiredService, HostTarget, HostTransport, OnExisting, Project};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -38,13 +38,16 @@ impl From<RawOnExisting> for OnExisting {
 
 #[derive(Debug, Deserialize)]
 struct RawHost {
-    ssh: String,
+    #[serde(default)]
+    local: bool,
+    #[serde(default)]
+    ssh: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawService {
     host: String,
-    command: String,
+    cmd: String,
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default, deserialize_with = "deserialize_env_files")]
@@ -85,11 +88,12 @@ fn normalize(raw: RawConfig, project_override: Option<&str>, base_dir: &Path) ->
     let mut hosts = BTreeMap::new();
     for (host_name, host) in raw.hosts {
         validate_name("host", &host_name)?;
+        let transport = normalize_host_transport(&host_name, host)?;
         hosts.insert(
             host_name.clone(),
             HostTarget {
                 name: host_name,
-                ssh: host.ssh,
+                transport,
             },
         );
     }
@@ -117,7 +121,7 @@ fn normalize(raw: RawConfig, project_override: Option<&str>, base_dir: &Path) ->
                 project: name.clone(),
                 name: service_name,
                 host: service.host,
-                command: service.command,
+                cmd: service.cmd,
                 cwd: service.cwd,
                 env,
                 stop_timeout: service.stop_timeout.unwrap_or(DEFAULT_STOP_TIMEOUT),
@@ -131,6 +135,15 @@ fn normalize(raw: RawConfig, project_override: Option<&str>, base_dir: &Path) ->
         hosts,
         services,
     })
+}
+
+fn normalize_host_transport(host_name: &str, host: RawHost) -> Result<HostTransport> {
+    match (host.local, host.ssh) {
+        (true, None) => Ok(HostTransport::Local),
+        (false, Some(ssh)) => Ok(HostTransport::Ssh(ssh)),
+        (true, Some(_)) => bail!("host `{host_name}` cannot set both `local: true` and `ssh`"),
+        (false, None) => bail!("host `{host_name}` must set either `local: true` or `ssh`"),
+    }
 }
 
 fn load_env_files(base_dir: &Path, env_files: &[PathBuf]) -> Result<BTreeMap<String, String>> {
@@ -256,5 +269,67 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
             .parse::<u64>()
             .map(Duration::from_secs)
             .map_err(|_| format!("invalid duration `{value}`; use seconds like `10s`"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::HostTransport;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn loads_local_and_ssh_hosts_with_cmd_services() {
+        let dir = std::env::temp_dir().join(format!("distrun-config-{}", unique_id()));
+        fs::create_dir_all(&dir).expect("create temp config dir");
+        let config_path = dir.join("distrun.yml");
+        fs::write(
+            &config_path,
+            r#"project: demo
+hosts:
+  laptop:
+    local: true
+  web:
+    ssh: web-prod
+services:
+  ui:
+    host: laptop
+    cmd: pnpm dev
+  api:
+    host: web
+    cmd: ./api
+"#,
+        )
+        .expect("write temp config");
+
+        let project = load(&config_path, None).expect("load config");
+
+        assert_eq!(project.hosts["laptop"].transport, HostTransport::Local);
+        assert_eq!(
+            project.hosts["web"].transport,
+            HostTransport::Ssh("web-prod".to_owned())
+        );
+        assert_eq!(project.services["ui"].cmd, "pnpm dev");
+        assert_eq!(project.services["api"].cmd, "./api");
+    }
+
+    #[test]
+    fn rejects_hosts_without_a_transport() {
+        let raw = RawHost {
+            local: false,
+            ssh: None,
+        };
+
+        let error = normalize_host_transport("empty", raw)
+            .expect_err("host without local or ssh should fail");
+
+        assert!(error.to_string().contains("must set either"));
+    }
+
+    fn unique_id() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_millis()
     }
 }

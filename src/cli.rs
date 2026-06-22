@@ -1,6 +1,6 @@
 use crate::backend::Backend;
 use crate::config;
-use crate::executor::SshExecutor;
+use crate::executor::SystemExecutor;
 use crate::model::{DesiredService, HostTarget, OnExisting, Project, RuntimeState, ServiceStatus};
 use crate::reconcile::reconcile_host;
 use crate::tmux::TmuxBackend;
@@ -53,7 +53,7 @@ pub fn run() -> Result<()> {
     };
     let project_override = merge_project_overrides(cli.project.as_deref(), positional_project)?;
     let project = config::load(&cli.file, project_override)?;
-    let backend = TmuxBackend::new(SshExecutor);
+    let backend = TmuxBackend::new(SystemExecutor);
 
     match cli.command {
         Command::Up { .. } => up(&backend, &project),

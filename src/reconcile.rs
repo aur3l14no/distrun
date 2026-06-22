@@ -91,7 +91,7 @@ mod tests {
             project: "demo".to_owned(),
             name: name.to_owned(),
             host: "web".to_owned(),
-            command: "sleep 60".to_owned(),
+            cmd: "sleep 60".to_owned(),
             cwd: None,
             env: BTreeMap::new(),
             stop_timeout: Duration::from_secs(1),

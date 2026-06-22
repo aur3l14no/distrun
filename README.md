@@ -1,18 +1,19 @@
 # distrun
 
-Run groups of processes on remote machines over SSH.
+Run groups of processes locally and on remote machines.
 
 ## What It Does
 
 - Starts services from a YAML file.
-- Runs services on one or more hosts.
+- Runs services locally, remotely, or across multiple hosts.
 - Shows status and recent logs.
 - Stops a project gracefully with `distrun down`.
 - Reports services that are missing or left over on configured hosts.
 
 ## Design
 
-- Uses SSH and `tmux` today.
+- Uses `tmux` today.
+- Runs local hosts directly and remote hosts over SSH.
 - Does not require a remote daemon.
 - Uses your normal OpenSSH config for ports, keys, proxy jumps, and other SSH
   options.
@@ -27,13 +28,20 @@ project: myapp
 on_existing: skip # skip | restart
 
 hosts:
+  laptop:
+    local: true
   web:
     ssh: web-prod
 
 services:
+  ui:
+    host: laptop
+    cmd: pnpm dev
+    cwd: /Users/me/myapp
+
   api:
     host: web
-    command: cargo run --release
+    cmd: cargo run --release
     cwd: /srv/myapp
     env_file:
       - ./api.env
@@ -42,8 +50,8 @@ services:
     stop_timeout: 10s
 ```
 
-`hosts.*.ssh` is passed to the system `ssh` command. Put connection details in
-your OpenSSH config.
+Hosts use either `local: true` or `ssh: <target>`. SSH targets are passed to the
+system `ssh` command, so put connection details in your OpenSSH config.
 
 Services are keyed by project, host, and service name.
 
@@ -94,7 +102,7 @@ web              worker                   running    orphan
 
 ## Current Limits
 
-Changing a service command, environment, or working directory does not restart a
+Changing a service cmd, environment, or working directory does not restart a
 running process by itself. distrun does not compare a running `tmux` pane with
 the service config. Use `on_existing: restart`, or run `distrun down` and then
 `distrun up`.

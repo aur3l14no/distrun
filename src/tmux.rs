@@ -1,5 +1,5 @@
 use crate::backend::Backend;
-use crate::executor::RemoteExecutor;
+use crate::executor::HostExecutor;
 use crate::model::{DesiredService, HostTarget, ObservedService, RuntimeState};
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -19,7 +19,7 @@ impl<E> TmuxBackend<E> {
 
 impl<E> Backend for TmuxBackend<E>
 where
-    E: RemoteExecutor,
+    E: HostExecutor,
 {
     fn list(&self, host: &HostTarget, project: &str) -> Result<Vec<ObservedService>> {
         let session = session_name(project);
@@ -225,7 +225,7 @@ fn service_command(service: &DesiredService) -> String {
         }
         commands.push(export);
     }
-    commands.push(format!("exec sh -lc {}", sh_quote(&service.command)));
+    commands.push(format!("exec sh -lc {}", sh_quote(&service.cmd)));
     commands.join(" && ")
 }
 
@@ -276,7 +276,7 @@ mod tests {
             project: "demo".to_owned(),
             name: "api".to_owned(),
             host: "web".to_owned(),
-            command: "echo $GREETING && sleep 1".to_owned(),
+            cmd: "echo $GREETING && sleep 1".to_owned(),
             cwd: Some("/srv/app".to_owned()),
             env: BTreeMap::from([("GREETING".to_owned(), "hello world".to_owned())]),
             stop_timeout: Duration::from_secs(1),

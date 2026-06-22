@@ -19,7 +19,13 @@ pub enum OnExisting {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostTarget {
     pub name: String,
-    pub ssh: String,
+    pub transport: HostTransport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostTransport {
+    Local,
+    Ssh(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +33,7 @@ pub struct DesiredService {
     pub project: String,
     pub name: String,
     pub host: String,
-    pub command: String,
+    pub cmd: String,
     pub cwd: Option<String>,
     pub env: BTreeMap<String, String>,
     pub stop_timeout: Duration,

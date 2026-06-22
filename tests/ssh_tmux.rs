@@ -167,7 +167,7 @@ fn service(name: &str, remote_dir: &str) -> String {
         r#"  {name}:
     host: test
     env_file: service.env
-    command: |
+    cmd: |
       bash -lc 'echo {name}-start >> {remote_dir}/{name}-starts; while true; do echo ${{DISTRUN_TEST_SUFFIX}}-{name}-tick; sleep 1; done'
     stop_timeout: 1s"#
     )
