@@ -26,13 +26,73 @@ fn status_allows_config_without_services() {
 }
 
 #[test]
-fn status_all_lists_managed_sessions_from_manual_local_host() {
+fn status_accepts_positional_project_override() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    fs::create_dir_all(&dir).expect("create temp config dir");
+    let config_path = dir.join("distrun.yml");
+    fs::write(&config_path, "").expect("write config");
+
+    let output = distrun(&["-f", path(&config_path), "status", "demo"]);
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "HOST             SERVICE                  RUNTIME    SPEC\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn logs_accepts_positional_project_override() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create fake bin dir");
+    write_logs_tmux(&bin_dir);
+    let config_path = dir.join("distrun.yml");
+    fs::write(&config_path, "services:\n  api:\n    cmd: sleep 60\n").expect("write config");
+
+    let output = distrun_with_path(&["-f", path(&config_path), "logs", "api", "demo"], &bin_dir);
+
+    assert_success(&output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn ps_lists_managed_sessions_from_manual_local_host() {
     let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
     let bin_dir = dir.join("bin");
     fs::create_dir_all(&bin_dir).expect("create fake bin dir");
     write_fake_tmux(&bin_dir);
 
-    let output = distrun_with_path(&["status", "--all", "--host", "local"], &bin_dir);
+    let output = distrun_with_path(&["ps", "--host", "local"], &bin_dir);
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "HOST             PROJECT                  SERVICE                  RUNTIME\n\
+         local            demo                     api                      running\n\
+         local            old                      worker                   exited\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn ps_lists_managed_sessions_from_hosts_only_config() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create fake bin dir");
+    write_fake_tmux(&bin_dir);
+    let config_path = dir.join("hosts.yml");
+    fs::write(
+        &config_path,
+        r#"hosts:
+  local: {}
+"#,
+    )
+    .expect("write hosts config");
+
+    let output = distrun_with_path(&["ps", "-f", path(&config_path)], &bin_dir);
 
     assert_success(&output);
     assert_eq!(
@@ -90,26 +150,33 @@ services:
 }
 
 #[test]
-fn status_all_rejects_project_filter() {
-    let output = distrun(&["status", "--all", "demo"]);
+fn status_rejects_removed_all_flag_before_loading_config() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    let config_path = dir.join("missing.yml");
+
+    let output = distrun(&["-f", path(&config_path), "status", "--all"]);
 
     assert_failure(&output);
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("status --all cannot be used with a project filter")
-    );
-
-    let output = distrun(&["-p", "demo", "status", "--all", "--host", "local"]);
-
-    assert_failure(&output);
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("status --all cannot be used with a project filter")
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--all"));
+    assert!(!stderr.contains("failed to read config"));
 }
 
 #[test]
-fn status_host_requires_all_before_loading_config() {
+fn ps_rejects_project_option_before_loading_config() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    let config_path = dir.join("missing.yml");
+
+    let output = distrun(&["-f", path(&config_path), "ps", "--project", "demo"]);
+
+    assert_failure(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--project"));
+    assert!(!stderr.contains("failed to read config"));
+}
+
+#[test]
+fn status_rejects_removed_host_flag_before_loading_config() {
     let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
     let config_path = dir.join("missing.yml");
 
@@ -117,7 +184,7 @@ fn status_host_requires_all_before_loading_config() {
 
     assert_failure(&output);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--host can only be used with status --all"));
+    assert!(stderr.contains("--host"));
     assert!(!stderr.contains("failed to read config"));
 }
 
@@ -341,6 +408,33 @@ if [ "$1" = "has-session" ]; then
 fi
 if [ "$1" = "list-windows" ] && [ "$2" = "-t" ]; then
     printf '%s\n' 'distrun_demo|db|0|0'
+    exit 0
+fi
+exit 1
+"#,
+    )
+    .expect("write fake tmux");
+    let mut permissions = fs::metadata(&tmux)
+        .expect("read fake tmux metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&tmux, permissions).expect("chmod fake tmux");
+}
+
+fn write_logs_tmux(bin_dir: &Path) {
+    let tmux = bin_dir.join("tmux");
+    fs::write(
+        &tmux,
+        r#"#!/bin/sh
+if [ "$1" = "has-session" ]; then
+    exit 0
+fi
+if [ "$1" = "list-windows" ]; then
+    printf '%s\n' '%1|api'
+    exit 0
+fi
+if [ "$1" = "capture-pane" ]; then
+    printf '%s\n\n' 'hello'
     exit 0
 fi
 exit 1

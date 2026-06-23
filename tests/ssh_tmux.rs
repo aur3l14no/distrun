@@ -48,7 +48,7 @@ test             worker                   running    in-sync
         ],
     );
 
-    let all_status = stdout(distrun(&["-f", path(&config_path), "status", "--all"]));
+    let all_status = stdout(distrun(&["-f", path(&config_path), "ps"]));
     assert_contains(
         &all_status,
         &format!("{:<16} {:<24} {:<24} running", "test", project, "api"),

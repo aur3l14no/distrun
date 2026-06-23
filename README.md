@@ -61,7 +61,7 @@ scripts/capture-readme-tui.sh
 ```sh
 distrun up
 distrun status
-distrun status --all
+distrun ps
 distrun logs api --host edge
 distrun tui
 distrun restart
@@ -104,9 +104,9 @@ edge             metrics                  -          missing
 edge             worker                   running    orphan
 ```
 
-`status --all` inspects every `distrun_*` tmux session on the configured hosts.
-Use repeated `--host` flags with `status --all` to inspect hosts without loading
-a config file.
+`ps` inspects every `distrun_*` tmux session on local plus the configured hosts.
+It can load a hosts-only config file without `project:` or `services:`. Use
+repeated `--host` flags with `ps` to inspect hosts without loading a config file.
 
 Status checks query hosts in parallel and use a per-host timeout, defaulting to
 5 seconds. If a host cannot be observed before the timeout, configured services

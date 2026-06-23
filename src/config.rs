@@ -63,6 +63,20 @@ pub fn load(path: &Path, project_override: Option<&str>) -> Result<Project> {
     normalize(raw, project_override)
 }
 
+pub fn load_hosts(path: &Path) -> Result<BTreeMap<String, HostTarget>> {
+    let mut loader = ConfigLoader::default();
+    let raw = loader.load(path, IncludeMode::Required)?;
+    let process_env = env::vars().collect::<BTreeMap<_, _>>();
+    let mut hosts = normalize_hosts(raw.hosts, &process_env)?;
+    hosts
+        .entry(LOCAL_HOST_NAME.to_owned())
+        .or_insert(HostTarget {
+            name: LOCAL_HOST_NAME.to_owned(),
+            transport: HostTransport::Local,
+        });
+    Ok(hosts)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IncludeMode {
     Required,
@@ -269,7 +283,7 @@ fn normalize_project_name(
         None => raw_name
             .map(|name| interpolate_config_value("project", &name, properties))
             .transpose()?
-            .context("missing project name; set `project:` in distrun.yml or pass --project"),
+            .context("missing project name; set `project:` in distrun.yml or pass PROJECT"),
     }
 }
 
