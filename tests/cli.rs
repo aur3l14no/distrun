@@ -59,6 +59,54 @@ fn logs_accepts_positional_project_override() {
 }
 
 #[test]
+fn project_commands_use_local_fallback_without_config_file() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create fake bin dir");
+
+    write_status_tmux(&bin_dir);
+    let status = distrun_with_path_in_dir(&["status", "demo"], &bin_dir, &dir);
+    assert_success(&status);
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        "HOST             SERVICE                  RUNTIME    SPEC\n\
+         local            db                       running    orphan\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&status.stderr), "");
+
+    write_logs_tmux(&bin_dir);
+    let logs = distrun_with_path_in_dir(&["logs", "api", "demo"], &bin_dir, &dir);
+    assert_success(&logs);
+    assert_eq!(String::from_utf8_lossy(&logs.stdout), "hello\n");
+    assert_eq!(String::from_utf8_lossy(&logs.stderr), "");
+
+    write_down_tmux(&bin_dir);
+    let down = distrun_with_path_in_dir(&["down", "demo"], &bin_dir, &dir);
+    assert_success(&down);
+    assert_eq!(String::from_utf8_lossy(&down.stdout), "local stopped\n");
+    assert_eq!(String::from_utf8_lossy(&down.stderr), "");
+}
+
+#[test]
+fn ps_defaults_to_local_host_without_config_file() {
+    let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).expect("create fake bin dir");
+    write_fake_tmux(&bin_dir);
+
+    let output = distrun_with_path_in_dir(&["ps"], &bin_dir, &dir);
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "HOST             PROJECT                  SERVICE                  RUNTIME\n\
+         local            demo                     api                      running\n\
+         local            old                      worker                   exited\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn ps_lists_managed_sessions_from_manual_local_host() {
     let dir = env::temp_dir().join(format!("distrun-cli-{}", unique_id()));
     let bin_dir = dir.join("bin");
@@ -130,13 +178,10 @@ services:
     .expect("write config");
 
     let started = Instant::now();
-    let output = distrun_with_path(
-        &["-f", path(&config_path), "status", "--timeout", "1500ms"],
-        &bin_dir,
-    );
+    let output = distrun_with_path(&["-f", path(&config_path), "status"], &bin_dir);
 
     assert_success(&output);
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(7));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
@@ -337,7 +382,20 @@ fn distrun_with_path(args: &[&str], bin_dir: &Path) -> Output {
     distrun_with_path_and_env(args, bin_dir, &[])
 }
 
+fn distrun_with_path_in_dir(args: &[&str], bin_dir: &Path, current_dir: &Path) -> Output {
+    distrun_with_path_env_and_dir(args, bin_dir, &[], Some(current_dir))
+}
+
 fn distrun_with_path_and_env(args: &[&str], bin_dir: &Path, envs: &[(&str, &str)]) -> Output {
+    distrun_with_path_env_and_dir(args, bin_dir, envs, None)
+}
+
+fn distrun_with_path_env_and_dir(
+    args: &[&str],
+    bin_dir: &Path,
+    envs: &[(&str, &str)],
+    current_dir: Option<&Path>,
+) -> Output {
     let old_path = env::var_os("PATH").unwrap_or_default();
     let mut paths = vec![bin_dir.to_path_buf()];
     paths.extend(env::split_paths(&old_path));
@@ -347,6 +405,9 @@ fn distrun_with_path_and_env(args: &[&str], bin_dir: &Path, envs: &[(&str, &str)
     command.args(args).env("PATH", path);
     for (key, value) in envs {
         command.env(key, value);
+    }
+    if let Some(current_dir) = current_dir {
+        command.current_dir(current_dir);
     }
     command.output().expect("run distrun")
 }
@@ -453,7 +514,7 @@ fn write_slow_ssh(bin_dir: &Path) {
     fs::write(
         &ssh,
         r#"#!/bin/sh
-sleep 5
+sleep 10
 "#,
     )
     .expect("write fake ssh");
@@ -462,6 +523,25 @@ sleep 5
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&ssh, permissions).expect("chmod fake ssh");
+}
+
+fn write_down_tmux(bin_dir: &Path) {
+    let tmux = bin_dir.join("tmux");
+    fs::write(
+        &tmux,
+        r#"#!/bin/sh
+if [ "$1" = "has-session" ]; then
+    exit 1
+fi
+exit 0
+"#,
+    )
+    .expect("write fake tmux");
+    let mut permissions = fs::metadata(&tmux)
+        .expect("read fake tmux metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&tmux, permissions).expect("chmod fake tmux");
 }
 
 fn write_recording_tmux(bin_dir: &Path) {

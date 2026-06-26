@@ -72,6 +72,11 @@ distrun down
 exited services. `on_existing: restart` stops and recreates configured services
 when you run `distrun up`.
 
+When `distrun.yml` is absent and you do not pass `-f`, inspection and cleanup
+commands that already name a project fall back to local: `distrun status demo`,
+`distrun logs api demo`, and `distrun down demo`. `up` and `restart` still need a
+config because they require service commands.
+
 ## Configuration
 
 Use `include` to split config across files, and `include?` for optional local
@@ -105,8 +110,9 @@ edge             worker                   running    orphan
 ```
 
 `ps` inspects every `distrun_*` tmux session on local plus the configured hosts.
-It can load a hosts-only config file without `project:` or `services:`. Use
-repeated `--host` flags with `ps` to inspect hosts without loading a config file.
+If no default config file is present, it falls back to local only. It can load a
+hosts-only config file without `project:` or `services:`. Use repeated `--host`
+flags with `ps` to inspect hosts without loading a config file.
 
 Status checks query hosts in parallel and use a per-host timeout, defaulting to
 5 seconds. If a host cannot be observed before the timeout, configured services

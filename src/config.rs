@@ -70,11 +70,32 @@ pub fn load_hosts(path: &Path) -> Result<BTreeMap<String, HostTarget>> {
     let mut hosts = normalize_hosts(raw.hosts, &process_env)?;
     hosts
         .entry(LOCAL_HOST_NAME.to_owned())
-        .or_insert(HostTarget {
-            name: LOCAL_HOST_NAME.to_owned(),
-            transport: HostTransport::Local,
-        });
+        .or_insert_with(local_host);
     Ok(hosts)
+}
+
+pub fn local_host() -> HostTarget {
+    HostTarget {
+        name: LOCAL_HOST_NAME.to_owned(),
+        transport: HostTransport::Local,
+    }
+}
+
+pub fn local_project(name: &str) -> Result<Project> {
+    empty_project(name, [local_host()])
+}
+
+pub fn empty_project(name: &str, hosts: impl IntoIterator<Item = HostTarget>) -> Result<Project> {
+    validate_name("project", name)?;
+    Ok(Project {
+        name: name.to_owned(),
+        on_existing: OnExisting::Skip,
+        hosts: hosts
+            .into_iter()
+            .map(|host| (host.name.clone(), host))
+            .collect(),
+        services: BTreeMap::new(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,10 +355,7 @@ fn normalize_services(
         if service_host == LOCAL_HOST_NAME {
             hosts
                 .entry(LOCAL_HOST_NAME.to_owned())
-                .or_insert(HostTarget {
-                    name: LOCAL_HOST_NAME.to_owned(),
-                    transport: HostTransport::Local,
-                });
+                .or_insert_with(local_host);
         } else if !hosts.contains_key(&service_host) {
             bail!("service `{service_name}` references unknown host `{service_host}`");
         }

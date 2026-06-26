@@ -6,16 +6,18 @@ use crate::model::{
 };
 use crate::ops;
 use crate::tmux::TmuxBackend;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+const DEFAULT_CONFIG_FILE: &str = "distrun.yml";
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Run processes anywhere, with SSH + tmux.")]
 struct Cli {
-    #[arg(short, long, global = true, default_value = "distrun.yml")]
-    file: PathBuf,
+    #[arg(short, long, global = true, value_name = "FILE")]
+    file: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -75,52 +77,30 @@ enum Command {
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let Cli { file, command } = Cli::parse();
+    let file = file.as_deref();
     let backend = TmuxBackend::new(SystemExecutor);
 
-    match cli.command {
+    match command {
         Command::Up { project } => {
-            let project = config::load(&cli.file, project.as_deref())?;
+            let project = load_required_project(file, project.as_deref())?;
             up(&backend, &project)
         }
         Command::Down { project } => {
-            let project = config::load(&cli.file, project.as_deref())?;
+            let project = load_project_or_local(file, project.as_deref())?;
             down(&backend, &project)
         }
         Command::Restart { project } => {
-            let project = config::load(&cli.file, project.as_deref())?;
+            let project = load_required_project(file, project.as_deref())?;
             restart(&backend, &project)
         }
         Command::Status { timeout, project } => {
-            let project = config::load(&cli.file, project.as_deref())?;
+            let project = load_project_or_local(file, project.as_deref())?;
             status(&backend, &project, timeout)
         }
         Command::Ps { hosts, timeout } => {
-            if hosts.is_empty() {
-                let hosts = config::load_hosts(&cli.file)?;
-                status_all(&backend, hosts.values(), timeout)
-            } else {
-                let hosts = hosts
-                    .into_iter()
-                    .map(|host| {
-                        if host.is_empty() {
-                            bail!("--host value cannot be empty");
-                        }
-
-                        let transport = if host == LOCAL_HOST_NAME {
-                            HostTransport::Local
-                        } else {
-                            HostTransport::Ssh(host.clone())
-                        };
-
-                        Ok(HostTarget {
-                            name: host,
-                            transport,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                status_all(&backend, &hosts, timeout)
-            }
+            let hosts = load_hosts_or_local(file, hosts)?;
+            status_all(&backend, &hosts, timeout)
         }
         Command::Logs {
             service,
@@ -128,14 +108,89 @@ pub fn run() -> Result<()> {
             host,
             tail,
         } => {
-            let project = config::load(&cli.file, project.as_deref())?;
+            let (project, host) = load_logs_project(file, project.as_deref(), host)?;
             logs(&backend, &project, &service, host.as_deref(), tail)
         }
         Command::Tui { tail, project } => {
-            let project = config::load(&cli.file, project.as_deref())?;
+            let project = load_project_or_local(file, project.as_deref())?;
             crate::tui::run(project, tail)
         }
     }
+}
+
+fn load_required_project(file: Option<&Path>, project: Option<&str>) -> Result<Project> {
+    config::load(required_config_file(file), project)
+}
+
+fn load_project_or_local(file: Option<&Path>, project: Option<&str>) -> Result<Project> {
+    let Some(file) = discovered_config_file(file) else {
+        return config::local_project(require_project(project)?);
+    };
+    config::load(file, project)
+}
+
+fn load_logs_project(
+    file: Option<&Path>,
+    project: Option<&str>,
+    host: Option<String>,
+) -> Result<(Project, Option<String>)> {
+    let Some(file) = discovered_config_file(file) else {
+        let host = host.unwrap_or_else(|| LOCAL_HOST_NAME.to_owned());
+        let project = config::empty_project(
+            require_project(project)?,
+            [host_from_cli_value(host.clone())?],
+        )?;
+        return Ok((project, Some(host)));
+    };
+    Ok((config::load(file, project)?, host))
+}
+
+fn load_hosts_or_local(file: Option<&Path>, hosts: Vec<String>) -> Result<Vec<HostTarget>> {
+    if !hosts.is_empty() {
+        return hosts.into_iter().map(host_from_cli_value).collect();
+    }
+
+    let Some(file) = discovered_config_file(file) else {
+        return Ok(vec![config::local_host()]);
+    };
+    config::load_hosts(file).map(|hosts| hosts.into_values().collect())
+}
+
+fn required_config_file<'a>(file: Option<&'a Path>) -> &'a Path {
+    file.unwrap_or_else(|| default_config_file())
+}
+
+fn discovered_config_file<'a>(file: Option<&'a Path>) -> Option<&'a Path> {
+    file.or_else(|| {
+        default_config_file()
+            .exists()
+            .then_some(default_config_file())
+    })
+}
+
+fn default_config_file() -> &'static Path {
+    Path::new(DEFAULT_CONFIG_FILE)
+}
+
+fn require_project(project: Option<&str>) -> Result<&str> {
+    project.context("missing project name; pass PROJECT or create distrun.yml")
+}
+
+fn host_from_cli_value(host: String) -> Result<HostTarget> {
+    if host.is_empty() {
+        bail!("--host value cannot be empty");
+    }
+
+    let transport = if host == LOCAL_HOST_NAME {
+        HostTransport::Local
+    } else {
+        HostTransport::Ssh(host.clone())
+    };
+
+    Ok(HostTarget {
+        name: host,
+        transport,
+    })
 }
 
 fn up(backend: &TmuxBackend<SystemExecutor>, project: &Project) -> Result<()> {
