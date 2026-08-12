@@ -46,7 +46,24 @@ pub struct ObservedService {
     pub project: String,
     pub host: String,
     pub name: String,
+    // tmux IDs are stable for the lifetime of this concrete runtime. Commands
+    // must use these IDs after resolving a user-facing service selector.
+    pub window_id: String,
+    pub pane_id: String,
+    // Older distrun windows do not carry a runtime ID. They remain observable
+    // and use capture-pane as a read-only log fallback.
+    pub runtime_id: Option<String>,
     pub runtime: RuntimeState,
+}
+
+impl ObservedService {
+    pub fn logical_key(&self) -> (&str, &str, &str) {
+        (&self.host, &self.project, &self.name)
+    }
+
+    pub fn instance_label(&self) -> &str {
+        self.runtime_id.as_deref().unwrap_or(&self.window_id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,20 +84,60 @@ impl RuntimeState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpecState {
-    InSync,
+pub enum RuntimeStatus {
+    Running,
+    Exited,
+    Unknown,
     Missing,
-    Orphan,
     Unavailable,
 }
 
-impl SpecState {
+impl RuntimeStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::InSync => "in-sync",
+            Self::Running => "running",
+            Self::Exited => "exited",
+            Self::Unknown => "unknown",
             Self::Missing => "missing",
-            Self::Orphan => "orphan",
             Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl From<RuntimeState> for RuntimeStatus {
+    fn from(runtime: RuntimeState) -> Self {
+        match runtime {
+            RuntimeState::Running => Self::Running,
+            RuntimeState::Exited => Self::Exited,
+            RuntimeState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigRelation {
+    Configured,
+    Orphan,
+}
+
+impl ConfigRelation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::Orphan => "orphan",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StatusIssue {
+    Duplicate { instance: String },
+}
+
+impl StatusIssue {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Duplicate { instance } => format!("duplicate:{instance}"),
         }
     }
 }
@@ -89,9 +146,7 @@ impl SpecState {
 pub struct ServiceStatus {
     pub host: String,
     pub service: String,
-    // Runtime state is what the backend observes right now.
-    pub runtime: Option<RuntimeState>,
-    // Spec state is the desired-vs-observed reconciliation result:
-    // missing = + desired only, orphan = - observed only, in-sync = both sides.
-    pub spec: SpecState,
+    pub runtime: RuntimeStatus,
+    pub relation: ConfigRelation,
+    pub issue: Option<StatusIssue>,
 }

@@ -16,15 +16,14 @@ pub struct HostOutput {
 pub trait HostExecutor {
     fn run(&self, host: &HostTarget, host_command: &str) -> Result<HostOutput>;
 
+    fn stream(&self, host: &HostTarget, host_command: &str) -> Result<()>;
+
     fn run_with_timeout(
         &self,
         host: &HostTarget,
         host_command: &str,
         timeout: Duration,
-    ) -> Result<HostOutput> {
-        let _ = timeout;
-        self.run(host, host_command)
-    }
+    ) -> Result<HostOutput>;
 }
 
 #[derive(Debug, Default)]
@@ -45,6 +44,9 @@ impl HostExecutor for SystemExecutor {
         host_command: &str,
         timeout: Duration,
     ) -> Result<HostOutput> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .context("command timeout is too large")?;
         let mut command = command_for(host, host_command);
         configure_timeout_process(&mut command);
         let mut child = command
@@ -60,7 +62,6 @@ impl HostExecutor for SystemExecutor {
             .with_context(|| format!("missing stderr pipe for host `{}`", host.name))?;
         let stdout_reader = read_pipe(stdout);
         let stderr_reader = read_pipe(stderr);
-        let deadline = Instant::now() + timeout;
 
         let status = loop {
             if let Some(status) = child
@@ -92,18 +93,34 @@ impl HostExecutor for SystemExecutor {
         };
         output_result(host, output)
     }
+
+    fn stream(&self, host: &HostTarget, host_command: &str) -> Result<()> {
+        let status = stream_command_for(host, host_command)
+            .status()
+            .with_context(|| format!("failed to run command for host `{}`", host.name))?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            bail!(
+                "command failed on host `{}` with status {}",
+                host.name,
+                status
+            )
+        }
+    }
 }
 
 fn command_for(host: &HostTarget, host_command: &str) -> Command {
     let mut command = match &host.transport {
         HostTransport::Local => {
             let mut command = Command::new("sh");
-            command.arg("-lc").arg(host_command);
+            command.arg("-c").arg(host_command);
             command
         }
         HostTransport::Ssh(target) => {
             let mut command = Command::new("ssh");
-            command.arg(target).arg(host_command);
+            command.arg("--").arg(target).arg(host_command);
             command
         }
     };
@@ -111,6 +128,26 @@ fn command_for(host: &HostTarget, host_command: &str) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command
+}
+
+fn stream_command_for(host: &HostTarget, host_command: &str) -> Command {
+    let mut command = match &host.transport {
+        HostTransport::Local => {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(host_command);
+            command
+        }
+        HostTransport::Ssh(target) => {
+            let mut command = Command::new("ssh");
+            command.arg("-T").arg("--").arg(target).arg(host_command);
+            command
+        }
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     command
 }
 
@@ -151,7 +188,6 @@ fn join_pipe(
 
 #[cfg(unix)]
 fn configure_timeout_process(command: &mut Command) {
-    // Put sh/ssh command trees in their own group so a timeout can clean up descendants too.
     command.process_group(0);
 }
 
@@ -225,5 +261,19 @@ mod tests {
             .expect("large output should not block process exit");
 
         assert_eq!(output.stdout.len(), 1_048_576);
+    }
+
+    #[test]
+    fn rejects_timeouts_that_cannot_be_represented_by_instant() {
+        let host = HostTarget {
+            name: "local".to_owned(),
+            transport: HostTransport::Local,
+        };
+
+        let error = SystemExecutor
+            .run_with_timeout(&host, "printf should-not-run", Duration::MAX)
+            .expect_err("oversized timeout should be rejected");
+
+        assert_eq!(error.to_string(), "command timeout is too large");
     }
 }

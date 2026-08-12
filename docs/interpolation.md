@@ -25,7 +25,7 @@ understands `$KEY`, `${KEY}`, defaults, required values, replacements, and `$$`.
 3. Project and hosts
    - Fields: `project`, `on_existing`, `hosts.*.ssh`.
    - Properties: parent environment only.
-   - Functions: `normalize_project_name`, `normalize_on_existing`,
+   - Functions: `normalize`, `normalize_on_existing`,
      `normalize_host_transport`.
 
 4. Service env

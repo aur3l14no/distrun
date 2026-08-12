@@ -32,6 +32,31 @@ struct RawConfig {
     services: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RawHostsConfig {
+    #[serde(default, deserialize_with = "deserialize_path_list")]
+    include: Vec<PathBuf>,
+    #[serde(
+        default,
+        rename = "include?",
+        deserialize_with = "deserialize_path_list"
+    )]
+    include_optional: Vec<PathBuf>,
+    #[serde(default)]
+    hosts: BTreeMap<String, RawHost>,
+}
+
+impl From<RawHostsConfig> for RawConfig {
+    fn from(raw: RawHostsConfig) -> Self {
+        Self {
+            include: raw.include,
+            include_optional: raw.include_optional,
+            hosts: raw.hosts,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RawHost {
     #[serde(default)]
@@ -57,21 +82,20 @@ struct RawServiceEnv {
     env: BTreeMap<String, String>,
 }
 
-pub fn load(path: &Path, project_override: Option<&str>) -> Result<Project> {
+pub fn load(path: &Path) -> Result<Project> {
     let mut loader = ConfigLoader::default();
     let raw = loader.load(path, IncludeMode::Required)?;
-    normalize(raw, project_override)
+    normalize(raw)
 }
 
 pub fn load_hosts(path: &Path) -> Result<BTreeMap<String, HostTarget>> {
-    let mut loader = ConfigLoader::default();
+    let mut loader = ConfigLoader {
+        hosts_only: true,
+        ..ConfigLoader::default()
+    };
     let raw = loader.load(path, IncludeMode::Required)?;
     let process_env = env::vars().collect::<BTreeMap<_, _>>();
-    let mut hosts = normalize_hosts(raw.hosts, &process_env)?;
-    hosts
-        .entry(LOCAL_HOST_NAME.to_owned())
-        .or_insert_with(local_host);
-    Ok(hosts)
+    normalize_hosts(raw.hosts, &process_env)
 }
 
 pub fn local_host() -> HostTarget {
@@ -79,10 +103,6 @@ pub fn local_host() -> HostTarget {
         name: LOCAL_HOST_NAME.to_owned(),
         transport: HostTransport::Local,
     }
-}
-
-pub fn local_project(name: &str) -> Result<Project> {
-    empty_project(name, [local_host()])
 }
 
 pub fn empty_project(name: &str, hosts: impl IntoIterator<Item = HostTarget>) -> Result<Project> {
@@ -108,6 +128,7 @@ enum IncludeMode {
 struct ConfigLoader {
     loaded: BTreeSet<PathBuf>,
     stack: Vec<PathBuf>,
+    hosts_only: bool,
 }
 
 impl ConfigLoader {
@@ -145,8 +166,12 @@ impl ConfigLoader {
     fn load_canonical(&mut self, path: &Path) -> Result<RawConfig> {
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        let mut raw: RawConfig = serde_saphyr::from_str(&source)
-            .with_context(|| format!("failed to parse YAML {}", path.display()))?;
+        let mut raw = if self.hosts_only {
+            serde_saphyr::from_str::<RawHostsConfig>(&source).map(Into::into)
+        } else {
+            serde_saphyr::from_str::<RawConfig>(&source)
+        }
+        .with_context(|| format!("failed to parse YAML {}", path.display()))?;
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let process_env = env::vars().collect::<BTreeMap<_, _>>();
 
@@ -168,7 +193,9 @@ impl ConfigLoader {
             merge_raw_config(&mut merged, included, &include_path)?;
         }
 
-        resolve_env_files(base_dir, &mut raw, &process_env)?;
+        if !self.hosts_only {
+            resolve_env_files(base_dir, &mut raw, &process_env)?;
+        }
         merge_raw_config(&mut merged, raw, path)?;
         Ok(merged)
     }
@@ -276,9 +303,13 @@ fn merge_raw_config(merged: &mut RawConfig, raw: RawConfig, source: &Path) -> Re
     Ok(())
 }
 
-fn normalize(raw: RawConfig, project_override: Option<&str>) -> Result<Project> {
+fn normalize(raw: RawConfig) -> Result<Project> {
     let process_env = env::vars().collect::<BTreeMap<_, _>>();
-    let name = normalize_project_name(raw.project, project_override, &process_env)?;
+    let name = raw
+        .project
+        .map(|name| interpolate_config_value("project", &name, &process_env))
+        .transpose()?
+        .context("missing project name; set `project:` in the configuration file")?;
     let on_existing = normalize_on_existing(raw.on_existing, &process_env)?;
 
     validate_name("project", &name)?;
@@ -292,20 +323,6 @@ fn normalize(raw: RawConfig, project_override: Option<&str>) -> Result<Project> 
         hosts,
         services,
     })
-}
-
-fn normalize_project_name(
-    raw_name: Option<String>,
-    project_override: Option<&str>,
-    properties: &BTreeMap<String, String>,
-) -> Result<String> {
-    match project_override {
-        Some(name) => Ok(name.to_owned()),
-        None => raw_name
-            .map(|name| interpolate_config_value("project", &name, properties))
-            .transpose()?
-            .context("missing project name; set `project:` in distrun.yml or pass PROJECT"),
-    }
 }
 
 fn normalize_hosts(
@@ -712,7 +729,7 @@ services:
         )
         .expect("write temp config");
 
-        let project = load(&config_path, None).expect("load config");
+        let project = load(&config_path).expect("load config");
 
         assert_eq!(project.name, "demo");
         assert_eq!(project.on_existing, OnExisting::Restart);
@@ -724,6 +741,78 @@ services:
             project.services["api"].stop_timeout,
             Duration::from_millis(250)
         );
+    }
+
+    #[test]
+    fn load_hosts_ignores_unrelated_config_field_types() {
+        let dir = env::temp_dir().join(format!("distrun-config-{}", unique_id()));
+        fs::create_dir_all(&dir).expect("create temp config dir");
+        let config_path = dir.join("hosts.yml");
+        fs::write(
+            &config_path,
+            r#"project: []
+on_existing: {}
+hosts:
+  edge:
+    ssh: edge-prod
+services: []
+"#,
+        )
+        .expect("write hosts inventory");
+
+        let hosts = load_hosts(&config_path).expect("load hosts inventory");
+
+        assert_eq!(
+            hosts["edge"].transport,
+            HostTransport::Ssh("edge-prod".to_owned())
+        );
+        assert!(!hosts.contains_key(LOCAL_HOST_NAME));
+    }
+
+    #[test]
+    fn load_hosts_preserves_recursive_includes() {
+        let dir = env::temp_dir().join(format!("distrun-config-{}", unique_id()));
+        let nested = dir.join("nested");
+        fs::create_dir_all(&nested).expect("create nested config dir");
+        let config_path = dir.join("hosts.yml");
+        fs::write(
+            &config_path,
+            r#"include: nested/edge.yml
+services: invalid-but-ignored
+"#,
+        )
+        .expect("write root hosts inventory");
+        fs::write(
+            nested.join("edge.yml"),
+            r#"include: gpu.yml
+project: [also, ignored]
+hosts:
+  edge:
+    ssh: edge-prod
+"#,
+        )
+        .expect("write edge hosts inventory");
+        fs::write(
+            nested.join("gpu.yml"),
+            r#"hosts:
+  gpu:
+    ssh: gpu-prod
+services: []
+"#,
+        )
+        .expect("write gpu hosts inventory");
+
+        let hosts = load_hosts(&config_path).expect("load recursive hosts inventory");
+
+        assert_eq!(
+            hosts["edge"].transport,
+            HostTransport::Ssh("edge-prod".to_owned())
+        );
+        assert_eq!(
+            hosts["gpu"].transport,
+            HostTransport::Ssh("gpu-prod".to_owned())
+        );
+        assert!(!hosts.contains_key(LOCAL_HOST_NAME));
     }
 
     #[test]
@@ -774,17 +863,50 @@ services:
         )
         .expect("write root config");
 
-        let project = load(&config_path, None).expect("load config");
+        let project = load(&config_path).expect("load config");
 
         assert_eq!(project.on_existing, OnExisting::Restart);
         assert_eq!(
             project.hosts["web"].transport,
             HostTransport::Ssh("web-prod".to_owned())
         );
+        assert_eq!(
+            project.hosts[LOCAL_HOST_NAME].transport,
+            HostTransport::Local
+        );
         assert_eq!(project.services["ui"].host, "local");
         assert_eq!(project.services["api"].host, "web");
         assert_eq!(project.services["api"].env["TOKEN"], "inline");
         assert_eq!(project.services["api"].env["FILE_ONLY"], "ok");
+    }
+
+    #[test]
+    fn remote_only_config_does_not_add_local_to_host_scope() {
+        let dir = env::temp_dir().join(format!("distrun-config-{}", unique_id()));
+        fs::create_dir_all(&dir).expect("create temp config dir");
+        let config_path = dir.join("distrun.yml");
+        fs::write(
+            &config_path,
+            r#"project: demo
+hosts:
+  edge:
+    ssh: edge-prod
+services:
+  api:
+    host: edge
+    cmd: ./api
+"#,
+        )
+        .expect("write temp config");
+
+        let project = load(&config_path).expect("load config");
+
+        assert_eq!(project.hosts.len(), 1);
+        assert_eq!(
+            project.hosts["edge"].transport,
+            HostTransport::Ssh("edge-prod".to_owned())
+        );
+        assert!(!project.hosts.contains_key(LOCAL_HOST_NAME));
     }
 
     #[test]
@@ -812,7 +934,7 @@ services:
         )
         .expect("write temp config");
 
-        let project = load(&config_path, None).expect("load config");
+        let project = load(&config_path).expect("load config");
 
         assert_eq!(project.hosts["local"].transport, HostTransport::Local);
         assert_eq!(
@@ -843,7 +965,7 @@ services:
         )
         .expect("write temp config");
 
-        let error = load(&config_path, None).expect_err("local host with ssh should fail");
+        let error = load(&config_path).expect_err("local host with ssh should fail");
 
         assert!(error.to_string().contains("local transport is fixed"));
     }
@@ -866,7 +988,7 @@ services:
         )
         .expect("write temp config");
 
-        let error = load(&config_path, None).expect_err("remote host without ssh should fail");
+        let error = load(&config_path).expect_err("remote host without ssh should fail");
 
         assert!(error.to_string().contains("must set `ssh`"));
     }
@@ -902,7 +1024,7 @@ include:
         )
         .expect("write root config");
 
-        let error = load(&config_path, None).expect_err("duplicate service should fail");
+        let error = load(&config_path).expect_err("duplicate service should fail");
 
         assert!(error.to_string().contains("duplicate service `api`"));
     }
@@ -923,7 +1045,7 @@ services:
         )
         .expect("write root config");
 
-        let error = load(&config_path, None).expect_err("missing include should fail");
+        let error = load(&config_path).expect_err("missing include should fail");
         let message = error.to_string();
 
         assert!(message.contains("failed to read config"));

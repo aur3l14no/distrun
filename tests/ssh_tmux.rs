@@ -40,15 +40,15 @@ fn manages_remote_services_and_reconciles_config_drift() {
     let status = stdout(distrun(&["-f", path(&config_path), "status"]));
     assert_status(
         &status,
-        expect![
-            [r#"HOST             SERVICE                  RUNTIME    SPEC
-test             api                      running    in-sync
-test             worker                   running    in-sync
-"#]
-        ],
+        expect![[
+            r#"HOST             SERVICE                  RUNTIME      RELATION     ISSUE
+test             api                      running      configured   -
+test             worker                   running      configured   -
+"#
+        ]],
     );
 
-    let all_status = stdout(distrun(&["-f", path(&config_path), "ps"]));
+    let all_status = stdout(distrun(&["-f", path(&config_path), "list"]));
     assert_contains(
         &all_status,
         &format!("{:<16} {:<24} {:<24} running", "test", project, "api"),
@@ -70,25 +70,26 @@ test             worker                   running    in-sync
         "on_existing: skip should not restart a running service"
     );
 
-    let worker_starts_before_restart = ssh.read_u64(&format!("wc -l < {remote_dir}/worker-starts"));
-    let restart_output = stdout(distrun(&["-f", path(&config_path), "restart"]));
+    let worker_starts_before_recreate =
+        ssh.read_u64(&format!("wc -l < {remote_dir}/worker-starts"));
+    let recreate_output = stdout(distrun(&["-f", path(&config_path), "recreate"]));
     expect![[r#"test stopped
 test api started
 test worker started
 "#]]
-    .assert_eq(&restart_output);
+    .assert_eq(&recreate_output);
     thread::sleep(Duration::from_secs(1));
-    let starts_after_restart = ssh.read_u64(&format!("wc -l < {remote_dir}/api-starts"));
-    let worker_starts_after_restart = ssh.read_u64(&format!("wc -l < {remote_dir}/worker-starts"));
+    let starts_after_recreate = ssh.read_u64(&format!("wc -l < {remote_dir}/api-starts"));
+    let worker_starts_after_recreate = ssh.read_u64(&format!("wc -l < {remote_dir}/worker-starts"));
     assert_eq!(
         starts_after + 1,
-        starts_after_restart,
-        "restart should recreate the project services"
+        starts_after_recreate,
+        "recreate should rebuild the project services"
     );
     assert_eq!(
-        worker_starts_before_restart + 1,
-        worker_starts_after_restart,
-        "restart should recreate every configured project service"
+        worker_starts_before_recreate + 1,
+        worker_starts_after_recreate,
+        "recreate should rebuild every configured project service"
     );
 
     write_config(
@@ -102,13 +103,13 @@ test worker started
     let drifted = stdout(distrun(&["-f", path(&config_path), "status"]));
     assert_status(
         &drifted,
-        expect![
-            [r#"HOST             SERVICE                  RUNTIME    SPEC
-test             api                      running    in-sync
-test             cron                     -          missing
-test             worker                   running    orphan
-"#]
-        ],
+        expect![[
+            r#"HOST             SERVICE                  RUNTIME      RELATION     ISSUE
+test             api                      running      configured   -
+test             cron                     missing      configured   -
+test             worker                   running      orphan       -
+"#
+        ]],
     );
 
     assert_success(&distrun(&["-f", path(&config_path), "up"]));
@@ -116,27 +117,79 @@ test             worker                   running    orphan
     let repaired = stdout(distrun(&["-f", path(&config_path), "status"]));
     assert_status(
         &repaired,
-        expect![
-            [r#"HOST             SERVICE                  RUNTIME    SPEC
-test             api                      running    in-sync
-test             cron                     running    in-sync
-test             worker                   running    orphan
-"#]
-        ],
+        expect![[
+            r#"HOST             SERVICE                  RUNTIME      RELATION     ISSUE
+test             api                      running      configured   -
+test             cron                     running      configured   -
+test             worker                   running      orphan       -
+"#
+        ]],
+    );
+
+    assert_success(&distrun(&["-f", path(&config_path), "recreate"]));
+    thread::sleep(Duration::from_secs(1));
+    let recreated = stdout(distrun(&["-f", path(&config_path), "status"]));
+    assert_status(
+        &recreated,
+        expect![[
+            r#"HOST             SERVICE                  RUNTIME      RELATION     ISSUE
+test             api                      running      configured   -
+test             cron                     running      configured   -
+"#
+        ]],
     );
 
     assert_success(&distrun(&["-f", path(&config_path), "down"]));
     let stopped = stdout(distrun(&["-f", path(&config_path), "status"]));
     assert_status(
         &stopped,
-        expect![
-            [r#"HOST             SERVICE                  RUNTIME    SPEC
-test             api                      -          missing
-test             cron                     -          missing
-"#]
-        ],
+        expect![[
+            r#"HOST             SERVICE                  RUNTIME      RELATION     ISSUE
+test             api                      missing      configured   -
+test             cron                     missing      configured   -
+"#
+        ]],
     );
 
+    ssh.run(&format!("rm -rf {remote_dir}"));
+}
+
+#[test]
+#[ignore = "requires scripts/run-docker-tests.sh or DISTRUN_TEST_SSH_* env vars"]
+fn follows_remote_logs_through_service_exit() {
+    let ssh = SshTarget::from_env();
+    let project = format!("it_{}", unique_id());
+    let remote_dir = format!("/tmp/distrun_{project}");
+    let local_dir = env::temp_dir().join(format!("distrun-{project}"));
+    let config_path = local_dir.join("distrun.yml");
+    let finite_service = r#"  api:
+    host: test
+    cmd: sleep 1; printf 'follow-first\n'; sleep 1; printf 'follow-complete\n'
+    stop_timeout: 1s"#
+        .to_owned();
+    write_config(
+        &config_path,
+        &ssh,
+        &project,
+        &remote_dir,
+        "skip",
+        &[finite_service],
+    );
+    assert_success(&distrun(&["-f", path(&config_path), "up"]));
+
+    let followed = stdout(distrun(&[
+        "-f",
+        path(&config_path),
+        "logs",
+        "api",
+        "-f",
+        "-n",
+        "0",
+    ]));
+    assert_contains(&followed, "follow-first");
+    assert_contains(&followed, "follow-complete");
+
+    assert_success(&distrun(&["-f", path(&config_path), "down"]));
     ssh.run(&format!("rm -rf {remote_dir}"));
 }
 
