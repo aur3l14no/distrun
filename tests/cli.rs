@@ -169,6 +169,17 @@ fn silent_tmux_failures_are_not_treated_as_absence_or_lock_contention() {
         stderr(&down)
     );
 
+    let incomplete = test.run_with_env_in_root(
+        &["-p", "demo", "list", "--timeout", "1s"],
+        &[("DISTRUN_SILENT_MODE", "incomplete")],
+    );
+    assert_failure(&incomplete);
+    assert!(
+        stderr(&incomplete).contains("tmux inventory did not complete"),
+        "{}",
+        stderr(&incomplete)
+    );
+
     let config_path = test.write(
         "distrun.yml",
         "project: demo\nservices:\n  api:\n    cmd: sleep 60\n",
@@ -1455,6 +1466,45 @@ fn tui_requires_interactive_terminal() {
 }
 
 #[test]
+fn real_tmux_up_starts_a_project_on_a_fresh_server() {
+    let Some((dir, socket_dir)) = cold_tmux_environment() else {
+        return;
+    };
+    let project = format!("cold_{}", unique_id());
+    let config_path = write_file(
+        &dir,
+        "distrun.yml",
+        format!(
+            "project: {project}\nservices:\n  api:\n    cmd: sleep 60\n    stop_timeout: 50ms\n"
+        ),
+    );
+
+    let up = real_distrun_command(&["-f", path(&config_path), "up"], &dir, &socket_dir)
+        .output()
+        .expect("start project on a fresh tmux server");
+    assert_stdout(&up, "local api started\n");
+
+    let present = real_tmux_command(
+        &["has-session", "-t", &format!("=distrun/{project}")],
+        &dir,
+        &socket_dir,
+    )
+    .output()
+    .expect("check newly created project session");
+    assert_success(&present);
+
+    let down = real_distrun_command(&["-p", &project, "down"], &dir, &socket_dir)
+        .output()
+        .expect("clean up cold-start project");
+    assert_stdout(&down, "local stopped\n");
+
+    let repeated_down = real_distrun_command(&["-p", &project, "down"], &dir, &socket_dir)
+        .output()
+        .expect("repeat down without a tmux server");
+    assert_stdout(&repeated_down, "local stopped\n");
+}
+
+#[test]
 fn real_tmux_start_is_atomic_and_transcript_logs_allow_multiple_followers() {
     let Some((dir, socket_dir)) = isolated_tmux_environment() else {
         return;
@@ -1553,7 +1603,7 @@ fn real_tmux_project_operations_do_not_match_a_longer_session_prefix() {
     };
     let base = format!("prefix_{}", unique_id());
     let longer = format!("{base}2");
-    let longer_session = format!("distrun_{longer}");
+    let longer_session = format!("distrun/{longer}");
     let create_longer = real_tmux_command(
         &["new-session", "-d", "-s", &longer_session, "sleep 60"],
         &dir,
@@ -1573,7 +1623,7 @@ fn real_tmux_project_operations_do_not_match_a_longer_session_prefix() {
         .expect("start shorter-prefix project");
     assert_success(&up);
 
-    for session in [format!("=distrun_{base}"), format!("={longer_session}")] {
+    for session in [format!("=distrun/{base}"), format!("={longer_session}")] {
         let present = real_tmux_command(&["has-session", "-t", &session], &dir, &socket_dir)
             .output()
             .expect("check exact session");
@@ -1665,6 +1715,13 @@ fn isolated_tmux_environment() -> Option<(std::path::PathBuf, std::path::PathBuf
     (probe.status.success() && reachable.status.success()).then_some((dir, socket_dir))
 }
 
+fn cold_tmux_environment() -> Option<(PathBuf, PathBuf)> {
+    let (dir, _) = isolated_tmux_environment()?;
+    let socket_dir = dir.join("cold-socket");
+    fs::create_dir_all(&socket_dir).expect("create cold tmux socket dir");
+    Some((dir, socket_dir))
+}
+
 fn distrun(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_distrun"))
         .args(args)
@@ -1729,7 +1786,15 @@ fn install_shell_script(bin_dir: &Path, name: &str, body: &str) {
 }
 
 fn install_tmux(bin_dir: &Path, body: &str) {
-    install_shell_script(bin_dir, "tmux", body);
+    let mut script = String::from(
+        r#"if [ "$1" = start-server ] && [ "$2" = ";" ] && [ "$3" = list-sessions ] && [ "$6" = ";" ] && [ "$7" = run-shell ] && [ "$8" = "printf '%s\n' '__distrun_inventory_complete_v1__'" ]; then
+    trap 'status=$?; trap - 0; if [ "$status" -eq 0 ]; then printf "%s\n" "__distrun_inventory_complete_v1__"; fi; exit "$status"' 0
+    set -- list-panes -a -F '#{session_name}|#{window_id}|#{pane_id}|#{@distrun_pane_id}|#{pane_active}|#{@distrun_service}|#{@distrun_runtime_id}|#{@distrun_ready}|#{pane_dead}'
+fi
+"#,
+    );
+    script.push_str(body);
+    install_shell_script(bin_dir, "tmux", &script);
 }
 
 fn install_ssh(bin_dir: &Path, body: &str) {
@@ -1754,10 +1819,10 @@ fn write_fake_tmux(bin_dir: &Path) {
         bin_dir,
         r#"if [ "$1" = "list-panes" ] && [ "$2" = "-a" ]; then
     printf '%s\n' \
-        'distrun_demo|@1|%1||1|api|||0' \
-        'distrun_old|@2|%2||1|worker|||1' \
+        'distrun/demo|@1|%1||1|api|||0' \
+        'distrun/old|@2|%2||1|worker|||1' \
         'manual|@3|%3||1|ignored|||0' \
-        'distrun_demo|@4|%4||1|||0'
+        'distrun/demo|@4|%4||1|||0'
     exit 0
 fi
 exit 1
@@ -1789,18 +1854,22 @@ fn write_silent_failure_tmux(bin_dir: &Path) {
     query:list-panes)
         exit 47
         ;;
+    incomplete:list-panes)
+        trap - 0
+        printf '%s\n' 'tmux socket unavailable' >&2
+        exit 0
+        ;;
     down:new-session)
         exit 0
         ;;
-    down:has-session)
+    down:list-panes)
         exit 47
         ;;
     down:kill-session)
         exit 0
         ;;
     lock:list-panes)
-        printf '%s\n' "can't find session: distrun_demo" >&2
-        exit 1
+        exit 0
         ;;
     lock:new-session)
         printf '%s\n' attempt >> "$DISTRUN_FAKE_TMUX_LOG"
@@ -1838,7 +1907,7 @@ fn write_host_scope_probe(bin_dir: &Path) {
         exit 0
         ;;
     has-session)
-        printf '%s\n' "can't find session: distrun_demo" >&2
+        printf '%s\n' "can't find session: distrun/demo" >&2
         exit 1
         ;;
 esac
@@ -1862,8 +1931,8 @@ fn write_status_tmux(bin_dir: &Path) {
         r#"if [ "$1" = "has-session" ]; then
     exit 0
 fi
-if [ "$1" = "list-panes" ] && [ "$2" = "-s" ]; then
-    printf '%s\n' 'distrun_demo|@1|%1||1|db|||0'
+if [ "$1" = "list-panes" ]; then
+    printf '%s\n' 'distrun/demo|@1|%1||1|db|||0'
     exit 0
 fi
 exit 1
@@ -1886,12 +1955,12 @@ fn write_persistent_logs_tmux(
             r#"case "$1" in
     has-session) exit 0 ;;
     list-panes)
-        printf '%s\n' 'distrun_demo|@1|%1|%1|1|api|Ab12Cd|1|{pane_dead}'
+        printf '%s\n' 'distrun/demo|@1|%1|%1|1|api|Ab12Cd|1|{pane_dead}'
         ;;
     display-message)
         case "$*" in
             *pane_pipe*) printf '%s\n' '{pipe_attached}|{pane_dead}' ;;
-            *) printf '%s\n' 'distrun_demo|@1|%1|api|Ab12Cd' ;;
+            *) printf '%s\n' 'distrun/demo|@1|%1|api|Ab12Cd' ;;
         esac
         ;;
 esac
@@ -1912,8 +1981,8 @@ fn write_captured_logs_tmux(bin_dir: &Path, capture_output: &str) {
         &format!(
             r#"case "$1" in
     has-session) exit 0 ;;
-    list-panes) printf '%s\n' 'distrun_demo|@1|%1||1|api|||1' ;;
-    display-message) printf '%s\n' 'distrun_demo|@1|%1|api|' ;;
+    list-panes) printf '%s\n' 'distrun/demo|@1|%1||1|api|||1' ;;
+    display-message) printf '%s\n' 'distrun/demo|@1|%1|api|' ;;
     capture-pane) cat {} ;;
 esac
 exit 0
@@ -1932,8 +2001,8 @@ fn write_duplicate_tmux(bin_dir: &Path) {
         ;;
     list-panes)
         printf '%s\n' \
-            'distrun_demo|@1|%1|%1|1|api|run1|1|0' \
-            'distrun_demo|@2|%2|%2|1|api|run2|1|1'
+            'distrun/demo|@1|%1|%1|1|api|run1|1|0' \
+            'distrun/demo|@2|%2|%2|1|api|run2|1|1'
         exit 0
         ;;
 esac
@@ -1951,12 +2020,12 @@ fn write_draining_logs_tmux(bin_dir: &Path) {
         exit 0
         ;;
     list-panes)
-        printf '%s\n' 'distrun_demo|@1|%1|%1|1|api|Ab12Cd|1|1'
+        printf '%s\n' 'distrun/demo|@1|%1|%1|1|api|Ab12Cd|1|1'
         ;;
     display-message)
         case "$*" in
             *session_name*)
-                printf '%s\n' 'distrun_demo|@1|%1|api|Ab12Cd'
+                printf '%s\n' 'distrun/demo|@1|%1|api|Ab12Cd'
                 ;;
             *'pane_pipe}|#{pane_dead}'*)
                 if [ -f "$DISTRUN_FAKE_PIPE_STATE" ]; then
@@ -1993,7 +2062,7 @@ fn write_streaming_logs_tmux(bin_dir: &Path) {
         exit 0
         ;;
     list-panes)
-        printf '%s\n' 'distrun_demo|@1|%1|%1|1|api|Ab12Cd|1|0'
+        printf '%s\n' 'distrun/demo|@1|%1|%1|1|api|Ab12Cd|1|0'
         ;;
     display-message)
         case "$*" in
@@ -2024,7 +2093,7 @@ fn write_streaming_logs_tmux(bin_dir: &Path) {
                 if [ -f "$DISTRUN_FAKE_TMUX_STATE" ]; then printf '1\n'; else printf '0\n'; fi
                 ;;
             *)
-                printf '%s\n' 'distrun_demo|@1|%1|api|Ab12Cd'
+                printf '%s\n' 'distrun/demo|@1|%1|api|Ab12Cd'
                 ;;
         esac
         ;;
@@ -2047,7 +2116,7 @@ case "$1" in
     list-panes)
         case "$*" in
             *session_name*)
-                printf '%s\n' 'distrun_demo|@1|%1|%1|1|api|Ab12Cd|1|1'
+                printf '%s\n' 'distrun/demo|@1|%1|%1|1|api|Ab12Cd|1|1'
                 ;;
             *)
                 printf '%s\n' '%1|%1|1|api|1'
@@ -2058,7 +2127,7 @@ case "$1" in
     display-message)
         case "$*" in
             *pane_dead*) printf '%s\n' '1' ;;
-            *) printf '%s\n' 'distrun_demo|@1|%1|api|Ab12Cd' ;;
+            *) printf '%s\n' 'distrun/demo|@1|%1|api|Ab12Cd' ;;
         esac
         exit 0
         ;;
@@ -2086,7 +2155,7 @@ fn write_failing_stop_tmux(bin_dir: &Path) -> std::path::PathBuf {
     list-panes)
         case "$*" in
             *session_name*)
-                printf '%s\n' 'distrun_demo|@1|%1|%1|1|api|Ab12Cd|1|0'
+                printf '%s\n' 'distrun/demo|@1|%1|%1|1|api|Ab12Cd|1|0'
                 ;;
             *)
                 printf '%s\n' '%1|%1|1|api|1'
@@ -2100,9 +2169,9 @@ fn write_failing_stop_tmux(bin_dir: &Path) -> std::path::PathBuf {
             *pane_dead*) printf '1\n' ;;
             *)
                 if [ "$DISTRUN_CHANGED_IDENTITY" = 1 ]; then
-                    printf '%s\n' 'distrun_demo|@2|%1|api|Ef34Gh'
+                    printf '%s\n' 'distrun/demo|@2|%1|api|Ef34Gh'
                 else
-                    printf '%s\n' 'distrun_demo|@1|%1|api|Ab12Cd'
+                    printf '%s\n' 'distrun/demo|@1|%1|api|Ab12Cd'
                 fi
                 ;;
         esac
@@ -2132,14 +2201,7 @@ fn write_project_log_cleanup_tmux(bin_dir: &Path) {
         exit 0
         ;;
     list-panes)
-        case "$*" in
-            *@distrun_runtime_id*)
-                printf '%s\n' 'api|Ab12Cd'
-                ;;
-            *)
-                printf '%s\n' '%1|%1|1|api|1'
-                ;;
-        esac
+        printf '%s\n' 'distrun/demo|@1|%1|%1|1|api|Ab12Cd|1|1'
         exit 0
         ;;
 esac
@@ -2156,13 +2218,13 @@ enum StalePane {
 fn write_stale_pane_tmux(bin_dir: &Path, state: StalePane) {
     let (pane, managed_pane, metadata, identity) = match state {
         StalePane::Missing => (
-            "distrun_demo|@1|%live|%dead|1|api|Old123|0|0|0",
+            "distrun/demo|@1|%live|%dead|1|api|Old123|0|0|0",
             "%%dead",
             "",
             "*%dead*) exit 1 ;;",
         ),
         StalePane::Unready => (
-            "distrun_demo|@1|%1|%1|1|api|Old123|0|1|0",
+            "distrun/demo|@1|%1|%1|1|api|Old123|0|1|0",
             "%%1",
             "*@distrun_runtime_id*) printf 'Old123\\n' ;;\n            *@distrun_ready*) printf '0\\n' ;;",
             "*%1*) printf '%s\\n' '@1|%1' ;;",
@@ -2204,8 +2266,8 @@ fn write_malformed_inventory_tmux(bin_dir: &Path) {
         bin_dir,
         r#"if [ "$1" = list-panes ]; then
     printf '%s\n' \
-        'distrun_bad|name|@9|%9|%9|1|bad||||0|0' \
-        'distrun_demo|@1|%1|%1|1|api||1|0'
+        'distrun/bad|name|@9|%9|%9|1|bad||||0|0' \
+        'distrun/demo|@1|%1|%1|1|api||1|0'
 fi
 exit 0
 "#,
@@ -2220,12 +2282,12 @@ fn write_orphan_tmux(bin_dir: &Path) {
         exit 0
         ;;
     list-panes)
-        printf '%s\n' 'distrun_demo|@1|%1||1|old-worker|||0'
+        printf '%s\n' 'distrun/demo|@1|%1||1|old-worker|||0'
         exit 0
         ;;
     display-message)
         case "$*" in
-            *session_name*) printf '%s\n' 'distrun_demo|@1|%1|old-worker|' ;;
+            *session_name*) printf '%s\n' 'distrun/demo|@1|%1|old-worker|' ;;
             *pane_dead*) printf '1\n' ;;
         esac
         exit 0
@@ -2253,9 +2315,9 @@ case "$1" in
         ;;
     list-panes)
         printf '%s\n' \
-            'distrun_demo|@1|%1||1|api|||0' \
-            'distrun_demo|@2|%2||1|worker|||0' \
-            'distrun_demo|@3|%3||1|old-worker|||0'
+            'distrun/demo|@1|%1||1|api|||0' \
+            'distrun/demo|@2|%2||1|worker|||0' \
+            'distrun/demo|@3|%3||1|old-worker|||0'
         ;;
     list-windows)
         [ -f "$DISTRUN_FAKE_TMUX_LOG.api-stopped" ] || printf '%s\n' '@1|api'
@@ -2265,9 +2327,9 @@ case "$1" in
         case "$*" in
             *pane_pipe*) printf '1\n' ;;
             *pane_dead*) printf '1\n' ;;
-            *%1*) printf '%s\n' 'distrun_demo|@1|%1|api|' ;;
-            *%2*) printf '%s\n' 'distrun_demo|@2|%2|worker|' ;;
-            *%3*) printf '%s\n' 'distrun_demo|@3|%3|old-worker|' ;;
+            *%1*) printf '%s\n' 'distrun/demo|@1|%1|api|' ;;
+            *%2*) printf '%s\n' 'distrun/demo|@2|%2|worker|' ;;
+            *%3*) printf '%s\n' 'distrun/demo|@3|%3|old-worker|' ;;
         esac
         ;;
     new-window)
@@ -2297,7 +2359,7 @@ fn write_recreate_tmux(bin_dir: &Path) {
         [ -f "$DISTRUN_FAKE_TMUX_STATE" ] || exit 1
         case "$5" in
             *window_name*) printf '%s\n' 'old-worker' ;;
-            *session_name*) printf '%s\n' 'distrun_demo|old-worker|0|0' ;;
+            *session_name*) printf '%s\n' 'distrun/demo|old-worker|0|0' ;;
             *) printf '%s\n' '%1|old-worker' ;;
         esac
         ;;
@@ -2324,10 +2386,10 @@ fn write_ambiguous_runtime(bin_dir: &Path) {
         exit 0
         ;;
     list-panes)
-        printf '%s\n' 'distrun_demo|@1|%1||1|api|||0'
+        printf '%s\n' 'distrun/demo|@1|%1||1|api|||0'
         ;;
     display-message)
-        printf '%s\n' 'distrun_demo|@1|%1|api|'
+        printf '%s\n' 'distrun/demo|@1|%1|api|'
         ;;
     capture-pane)
         printf '%s log\n' "${DISTRUN_FAKE_REMOTE:-local}"
@@ -2368,7 +2430,7 @@ case "$1" in
         exit 0
         ;;
     list-panes)
-        printf '%s\n' 'distrun_demo|@1|%1||1|api|||0'
+        printf '%s\n' 'distrun/demo|@1|%1||1|api|||0'
         exit 0
         ;;
     capture-pane)

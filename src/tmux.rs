@@ -10,7 +10,8 @@ const LOG_ROOT: &str = ".local/state/distrun/logs";
 const LOG_DRAIN_MAX_POLLS: usize = 20;
 const LOG_DRAIN_POLL_SECONDS: &str = "0.05";
 const LOG_DRAIN_GRACE_SECONDS: &str = "1";
-const SESSION_PREFIX: &str = "distrun_";
+const SESSION_PREFIX: &str = "distrun/";
+const INVENTORY_SENTINEL: &str = "__distrun_inventory_complete_v1__";
 const PLACEHOLDER_COMMAND: &str = "exec sleep 315360000";
 const REQUIRE_TMUX: &str = "command -v tmux >/dev/null 2>&1 || { printf '%s\\n' 'tmux is not installed on this host' >&2; exit 127; }";
 const PANE_LIST_FORMAT: &str = "#{session_name}|#{window_id}|#{pane_id}|#{@distrun_pane_id}|#{pane_active}|#{@distrun_service}|#{@distrun_runtime_id}|#{@distrun_ready}|#{pane_dead}";
@@ -70,11 +71,7 @@ where
         project: &str,
         timeout: Option<Duration>,
     ) -> Result<Vec<ObservedService>> {
-        let session = exact_session_target(project);
-        let command = format!(
-            "{REQUIRE_TMUX}; {}",
-            optional_tmux_query(&["list-panes", "-s", "-t", &session, "-F", PANE_LIST_FORMAT,]),
-        );
+        let command = pane_inventory_command();
         let output = self.run_observation_command(host, &command, timeout)?;
         let services = parse_pane_lines(&host.name, &output.stdout)?;
 
@@ -89,10 +86,7 @@ where
         host: &HostTarget,
         timeout: Duration,
     ) -> Result<Vec<ObservedService>> {
-        let command = format!(
-            "{REQUIRE_TMUX}; {}",
-            optional_tmux_query(&["list-panes", "-a", "-F", PANE_LIST_FORMAT]),
-        );
+        let command = pane_inventory_command();
         let output = self.executor.run_with_timeout(host, &command, timeout)?;
         parse_pane_lines(&host.name, &output.stdout)
     }
@@ -302,25 +296,24 @@ fn stop_service_command(service: &ObservedService, timeout: Duration) -> Result<
 
 fn stop_project_command(project: &str, timeout: Duration) -> Result<String> {
     validate_component("project", project)?;
-    let session = exact_session_target(project);
+    let session_name = session_name(project);
+    let session_target = exact_session_target(project);
+    let inventory = pane_inventory_command();
     let sleep_for = sleep_duration(timeout);
     let body = format!(
-        "set -e; session={}; managed_logs=; \
-         if session_error=$(tmux has-session -t \"$session\" 2>&1); then \
-           managed_logs=$(tmux list-panes -s -t \"$session\" -F '#{{@distrun_service}}|#{{@distrun_runtime_id}}'); \
-           targets=$(tmux list-panes -s -t \"$session\" -F '#{{pane_id}}|#{{@distrun_pane_id}}|#{{pane_active}}|#{{@distrun_service}}|#{{pane_dead}}' | \
-             awk -F '\\|' '$4 != \"\" && (($2 != \"\" && $1 == $2) || ($2 == \"\" && $3 == \"1\")) && $5 == \"0\" {{ print $1 }}'); \
+        "set -e; session_name={}; session_target={}; \
+         inventory=$({inventory}); \
+         project_inventory=$(printf '%s\\n' \"$inventory\" | awk -F '\\|' -v session=\"$session_name\" '$1 == session'); \
+         managed_logs=; \
+         if [ -n \"$project_inventory\" ]; then \
+           managed_logs=$(printf '%s\\n' \"$project_inventory\" | awk -F '\\|' '$6 != \"\" {{ print $6 \"|\" $7 }}'); \
+           targets=$(printf '%s\\n' \"$project_inventory\" | \
+             awk -F '\\|' '$6 != \"\" && (($4 != \"\" && $3 == $4) || ($4 == \"\" && $5 == \"1\")) && $9 == \"0\" {{ print $3 }}'); \
            if [ -n \"$targets\" ]; then \
              for pane_id in $targets; do tmux send-keys -t \"$pane_id\" C-c; done; \
              sleep {sleep_for}; \
            fi; \
-           tmux kill-session -t \"$session\"; \
-         else \
-           session_status=$?; \
-           case \"$session_error\" in \
-             *\"no server running on \"*|*\"can't find session:\"*) ;; \
-             *) printf '%s\\n' \"$session_error\" >&2; exit \"$session_status\" ;; \
-           esac; \
+           tmux kill-session -t \"$session_target\"; \
          fi; \
          if [ -n \"$managed_logs\" ]; then \
            printf '%s\\n' \"$managed_logs\" | while IFS='|' read -r service runtime_id; do \
@@ -331,7 +324,8 @@ fn stop_project_command(project: &str, timeout: Duration) -> Result<String> {
            done; \
          fi; \
          rmdir \"$HOME/{LOG_ROOT}/{project}\" 2>/dev/null || true",
-        sh_quote(&session),
+        sh_quote(&session_name),
+        sh_quote(&session_target),
     );
     with_project_lock(project, &body)
 }
@@ -532,18 +526,27 @@ fn display_log_pipe_command(pane_id: &str) -> String {
     tmux(&["display-message", "-p", "-t", pane_id, "#{pane_pipe}"])
 }
 
-fn optional_tmux_query(args: &[&str]) -> String {
-    let command = tmux(args);
+fn pane_inventory_command() -> String {
+    let format = format!("#{{W:#{{P:{PANE_LIST_FORMAT}\n}}}}");
+    let sentinel_command = format!("printf '%s\\n' {}", sh_quote(INVENTORY_SENTINEL));
+    let query = tmux(&[
+        "start-server",
+        ";",
+        "list-sessions",
+        "-F",
+        &format,
+        ";",
+        "run-shell",
+        &sentinel_command,
+    ]);
     format!(
-        "if output=$({command} 2>&1); then \
-           [ -z \"$output\" ] || printf '%s\\n' \"$output\"; \
-         else \
-           status=$?; \
-           case \"$output\" in \
-             *\"no server running on \"*|*\"can't find session:\"*) ;; \
-             *) printf '%s\\n' \"$output\" >&2; exit \"$status\" ;; \
-           esac; \
-         fi"
+        "{REQUIRE_TMUX}; sentinel={}; output=$({query}) || exit $?; \
+         inventory=${{output%\"$sentinel\"}}; \
+         if [ \"$inventory\" = \"$output\" ]; then \
+           printf '%s\n' 'tmux inventory did not complete' >&2; exit 1; \
+         fi; \
+         printf '%s' \"$inventory\"",
+        sh_quote(INVENTORY_SENTINEL),
     )
 }
 
@@ -764,18 +767,20 @@ mod tests {
         let command = start_command(&service).expect("build start command");
 
         assert_valid_shell("start", &command);
-        assert!(command.contains("'=distrun_debug_demo'"));
+        assert!(command.contains("'=distrun/debug_demo'"));
         assert!(command.contains("tmux pipe-pane -O"));
         assert!(command.contains("exec cat >>"));
     }
 
     #[test]
     fn project_session_targets_require_exact_tmux_matches() {
-        assert_eq!(exact_session_target("demo"), "=distrun_demo");
+        assert_eq!(exact_session_target("demo"), "=distrun/demo");
 
         let stop = stop_project_command("demo", Duration::from_secs(1))
             .expect("build stop project command");
-        assert!(stop.contains("session='=distrun_demo'"));
+        assert_valid_shell("stop project", &stop);
+        assert!(stop.contains("session_name='distrun/demo'"));
+        assert!(stop.contains("session_target='=distrun/demo'"));
     }
 
     #[test]
@@ -809,19 +814,19 @@ mod tests {
 
     #[test]
     fn pane_parser_keeps_managed_pane_and_active_legacy_pane() {
-        let managed = "distrun_demo|@2|%3|%3|1|api|Ab12Cd|1|0";
+        let managed = "distrun/demo|@2|%3|%3|1|api|Ab12Cd|1|0";
         assert_eq!(
             parse_pane_line("web", managed).expect("parse managed pane"),
             Some(observed(true))
         );
 
-        let split = "distrun_demo|@2|%4|%3|0|api|Ab12Cd|1|0";
+        let split = "distrun/demo|@2|%4|%3|0|api|Ab12Cd|1|0";
         assert_eq!(
             parse_pane_line("web", split).expect("parse split pane"),
             None
         );
 
-        let legacy = "distrun_demo|@2|%3||1|api|||0";
+        let legacy = "distrun/demo|@2|%3||1|api|||0";
         let parsed = parse_pane_line("web", legacy)
             .expect("parse legacy pane")
             .expect("legacy service");
@@ -830,13 +835,13 @@ mod tests {
 
     #[test]
     fn pane_parser_hides_managed_runtimes_until_start_is_ready() {
-        let starting = "distrun_demo|@2|%3|%3|1|api|Ab12Cd|0|0";
+        let starting = "distrun/demo|@2|%3|%3|1|api|Ab12Cd|0|0";
         assert_eq!(
             parse_pane_line("web", starting).expect("parse starting runtime"),
             None
         );
 
-        let ready = "distrun_demo|@2|%3|%3|1|api|Ab12Cd|1|0";
+        let ready = "distrun/demo|@2|%3|%3|1|api|Ab12Cd|1|0";
         assert_eq!(
             parse_pane_line("web", ready).expect("parse ready runtime"),
             Some(observed(true))
@@ -845,7 +850,7 @@ mod tests {
 
     #[test]
     fn pane_parser_uses_dead_pane_as_exited_state() {
-        let exited = "distrun_demo|@2|%3|%3|1|api|Ab12Cd|1|1";
+        let exited = "distrun/demo|@2|%3|%3|1|api|Ab12Cd|1|1";
         let parsed = parse_pane_line("web", exited)
             .expect("parse managed exited runtime")
             .expect("managed runtime");
@@ -860,7 +865,7 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_pane_line("web", "distrun_demo|@2|%3|%3|1|||0").expect("parse unmarked window"),
+            parse_pane_line("web", "distrun/demo|@2|%3|%3|1|||0").expect("parse unmarked window"),
             None
         );
     }

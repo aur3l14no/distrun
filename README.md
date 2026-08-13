@@ -1,8 +1,9 @@
 # distrun
 
 Run a small process stack across your laptop and SSH hosts, then inspect runtime
-state and logs from one terminal. distrun uses `tmux` locally and over SSH, so
-there is no remote daemon to install.
+state and logs from one terminal. distrun requires `tmux` 2.9 or newer locally
+and on every SSH host, so there is no remote daemon to install.
+Project runtimes use tmux sessions named `distrun/<project>`.
 
 ## Example
 
