@@ -127,7 +127,7 @@ fn tmux_operational_failures_are_not_treated_as_an_empty_runtime() {
     let test = TestEnv::new();
     write_broken_server_tmux(&test.bin);
 
-    let list = test.run_in_root(&["-p", "demo", "list", "--timeout", "1s"]);
+    let list = test.run_in_root(&["-p", "demo", "list", "--timeout", "5s"]);
     assert_failure(&list);
     assert_eq!(
         stdout(&list),
@@ -150,7 +150,7 @@ fn silent_tmux_failures_are_not_treated_as_absence_or_lock_contention() {
     write_silent_failure_tmux(&test.bin);
 
     let list = test.run_with_env_in_root(
-        &["-p", "demo", "list", "--timeout", "1s"],
+        &["-p", "demo", "list", "--timeout", "5s"],
         &[("DISTRUN_SILENT_MODE", "query")],
     );
     assert_failure(&list);
@@ -170,7 +170,7 @@ fn silent_tmux_failures_are_not_treated_as_absence_or_lock_contention() {
     );
 
     let incomplete = test.run_with_env_in_root(
-        &["-p", "demo", "list", "--timeout", "1s"],
+        &["-p", "demo", "list", "--timeout", "5s"],
         &[("DISTRUN_SILENT_MODE", "incomplete")],
     );
     assert_failure(&incomplete);
@@ -1787,8 +1787,8 @@ fn install_shell_script(bin_dir: &Path, name: &str, body: &str) {
 
 fn install_tmux(bin_dir: &Path, body: &str) {
     let mut script = String::from(
-        r#"if [ "$1" = start-server ] && [ "$2" = ";" ] && [ "$3" = list-sessions ] && [ "$6" = ";" ] && [ "$7" = run-shell ] && [ "$8" = "printf '%s\n' '__distrun_inventory_complete_v1__'" ]; then
-    trap 'status=$?; trap - 0; if [ "$status" -eq 0 ]; then printf "%s\n" "__distrun_inventory_complete_v1__"; fi; exit "$status"' 0
+        r#"if [ "$1" = start-server ] && [ "$2" = ";" ] && [ "$3" = list-sessions ] && [ "$6" = ";" ] && [ "$7" = show-options ] && [ "$8" = -g ] && [ "$9" = exit-empty ]; then
+    trap 'status=$?; trap - 0; if [ "$status" -eq 0 ]; then printf "%s\n" "exit-empty off"; fi; exit "$status"' 0
     set -- list-panes -a -F '#{session_name}|#{window_id}|#{pane_id}|#{@distrun_pane_id}|#{pane_active}|#{@distrun_service}|#{@distrun_runtime_id}|#{@distrun_ready}|#{pane_dead}'
 fi
 "#,

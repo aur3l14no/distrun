@@ -11,7 +11,6 @@ const LOG_DRAIN_MAX_POLLS: usize = 20;
 const LOG_DRAIN_POLL_SECONDS: &str = "0.05";
 const LOG_DRAIN_GRACE_SECONDS: &str = "1";
 const SESSION_PREFIX: &str = "distrun/";
-const INVENTORY_SENTINEL: &str = "__distrun_inventory_complete_v1__";
 const PLACEHOLDER_COMMAND: &str = "exec sleep 315360000";
 const REQUIRE_TMUX: &str = "command -v tmux >/dev/null 2>&1 || { printf '%s\\n' 'tmux is not installed on this host' >&2; exit 127; }";
 const PANE_LIST_FORMAT: &str = "#{session_name}|#{window_id}|#{pane_id}|#{@distrun_pane_id}|#{pane_active}|#{@distrun_service}|#{@distrun_runtime_id}|#{@distrun_ready}|#{pane_dead}";
@@ -528,7 +527,7 @@ fn display_log_pipe_command(pane_id: &str) -> String {
 
 fn pane_inventory_command() -> String {
     let format = format!("#{{W:#{{P:{PANE_LIST_FORMAT}\n}}}}");
-    let sentinel_command = format!("printf '%s\\n' {}", sh_quote(INVENTORY_SENTINEL));
+    // This server-scoped option is synchronous and needs no pane on tmux 2.9.
     let query = tmux(&[
         "start-server",
         ";",
@@ -536,17 +535,20 @@ fn pane_inventory_command() -> String {
         "-F",
         &format,
         ";",
-        "run-shell",
-        &sentinel_command,
+        "show-options",
+        "-g",
+        "exit-empty",
     ]);
     format!(
-        "{REQUIRE_TMUX}; sentinel={}; output=$({query}) || exit $?; \
-         inventory=${{output%\"$sentinel\"}}; \
+        "{REQUIRE_TMUX}; output=$({query}) || exit $?; \
+         completion='exit-empty on'; inventory=${{output%\"$completion\"}}; \
+         if [ \"$inventory\" = \"$output\" ]; then \
+           completion='exit-empty off'; inventory=${{output%\"$completion\"}}; \
+         fi; \
          if [ \"$inventory\" = \"$output\" ]; then \
            printf '%s\n' 'tmux inventory did not complete' >&2; exit 1; \
          fi; \
          printf '%s' \"$inventory\"",
-        sh_quote(INVENTORY_SENTINEL),
     )
 }
 
