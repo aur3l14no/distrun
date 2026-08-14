@@ -256,17 +256,16 @@ fn down_reports_each_host_and_continues_after_a_failure() {
             stopped("zeta", None),
         ]
     );
-    assert_eq!(
-        backend
-            .calls()
-            .into_iter()
-            .filter_map(|call| match call {
-                Call::StopProject { host, .. } => Some(host),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-        vec!["edge", "local", "zeta"]
-    );
+    let mut stopped_hosts = backend
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::StopProject { host, .. } => Some(host),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    stopped_hosts.sort();
+    assert_eq!(stopped_hosts, vec!["edge", "local", "zeta"]);
 }
 
 #[test]

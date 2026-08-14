@@ -359,10 +359,13 @@ service exit, log reads use a bounded drain delay because tmux has no durable
 transcript-flushed event; an unusually slow filesystem may therefore omit the
 last bytes from that read even though the transcript remains readable later.
 
-Lifecycle mutations do not currently have an outer transport deadline. The
-configured `stop_timeout` controls the service's interrupt grace period, but an
-SSH connection that never returns can still block `up`, `recreate`, `stop`, or
-`down` before the final operation report is printed.
+Service and project stops have an internal per-host deadline: the configured
+`stop_timeout` plus five seconds for transport and tmux coordination. `down`
+stops hosts concurrently, so one unavailable host does not prevent the others
+from being attempted. A timed-out stop may have partially completed because the
+remote command may already have started; distrun does not roll back successful
+hosts. Observation and start phases used by `up` and `recreate` do not yet have
+the same outer deadline.
 
 If a start is forcibly killed after its transcript directory is created but
 before the runtime becomes ready, a later `up` repairs the tmux window but may

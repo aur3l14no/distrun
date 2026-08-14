@@ -1,7 +1,7 @@
 use crate::backend::{Backend, StartResult};
 use crate::executor::{HostExecutor, HostOutput};
 use crate::model::{DesiredService, HostTarget, ObservedService, RuntimeState};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::time::Duration;
 
 const BOOTSTRAP_WINDOW: &str = "__distrun_bootstrap";
@@ -10,6 +10,8 @@ const LOG_ROOT: &str = ".local/state/distrun/logs";
 const LOG_DRAIN_MAX_POLLS: usize = 20;
 const LOG_DRAIN_POLL_SECONDS: &str = "0.05";
 const LOG_DRAIN_GRACE_SECONDS: &str = "1";
+const STOP_OPERATION_OVERHEAD: Duration = Duration::from_secs(5);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SESSION_PREFIX: &str = "distrun/";
 const PLACEHOLDER_COMMAND: &str = "exec sleep 315360000";
 const REQUIRE_TMUX: &str = "command -v tmux >/dev/null 2>&1 || { printf '%s\\n' 'tmux is not installed on this host' >&2; exit 127; }";
@@ -147,13 +149,23 @@ where
         timeout: Duration,
     ) -> Result<()> {
         self.executor
-            .run(host, &stop_service_command(service, timeout)?)?;
+            .run_with_timeout(
+                host,
+                &stop_service_command(service, timeout)?,
+                stop_operation_timeout(timeout)?,
+            )
+            .context("service stop failed")?;
         Ok(())
     }
 
     fn stop_project(&self, host: &HostTarget, project: &str, timeout: Duration) -> Result<()> {
         self.executor
-            .run(host, &stop_project_command(project, timeout)?)?;
+            .run_with_timeout(
+                host,
+                &stop_project_command(project, timeout)?,
+                stop_operation_timeout(timeout)?,
+            )
+            .context("project stop failed")?;
         Ok(())
     }
 
@@ -262,7 +274,7 @@ fn stop_service_command(service: &ObservedService, timeout: Duration) -> Result<
     let expected = expected_identity(service);
     let display_identity = display_identity_command(&service.pane_id);
     let cleanup = cleanup_service_log_command(service);
-    let sleep_for = sleep_duration(timeout);
+    let wait_for_exit = wait_for_panes_command(&sh_quote(&service.pane_id), timeout)?;
     let body = format!(
         "set -e; \
          if ! current=$({display_identity} 2>/dev/null); then \
@@ -275,7 +287,7 @@ fn stop_service_command(service: &ObservedService, timeout: Duration) -> Result<
            printf '%s\\n' 'failed to inspect runtime state before stopping' >&2; exit 46; \
          fi; \
          if [ \"$pane_dead\" = 0 ]; then \
-           tmux send-keys -t {} C-c; sleep {sleep_for}; \
+           tmux send-keys -t {} C-c; {wait_for_exit}; \
          fi; \
          if ! current=$({display_identity} 2>/dev/null); then \
            printf '%s\\n' 'failed to verify runtime identity after interrupt' >&2; exit 46; \
@@ -298,7 +310,7 @@ fn stop_project_command(project: &str, timeout: Duration) -> Result<String> {
     let session_name = session_name(project);
     let session_target = exact_session_target(project);
     let inventory = pane_inventory_command();
-    let sleep_for = sleep_duration(timeout);
+    let wait_for_exit = wait_for_panes_command("$targets", timeout)?;
     let body = format!(
         "set -e; session_name={}; session_target={}; \
          inventory=$({inventory}); \
@@ -310,7 +322,7 @@ fn stop_project_command(project: &str, timeout: Duration) -> Result<String> {
              awk -F '\\|' '$6 != \"\" && (($4 != \"\" && $3 == $4) || ($4 == \"\" && $5 == \"1\")) && $9 == \"0\" {{ print $3 }}'); \
            if [ -n \"$targets\" ]; then \
              for pane_id in $targets; do tmux send-keys -t \"$pane_id\" C-c; done; \
-             sleep {sleep_for}; \
+             {wait_for_exit}; \
            fi; \
            tmux kill-session -t \"$session_target\"; \
          fi; \
@@ -704,6 +716,37 @@ fn sleep_duration(duration: Duration) -> String {
         fractional.pop();
     }
     format!("{}.{}", duration.as_secs(), fractional)
+}
+
+fn stop_operation_timeout(grace: Duration) -> Result<Duration> {
+    grace
+        .checked_add(STOP_OPERATION_OVERHEAD)
+        .context("stop timeout is too large")
+}
+
+fn wait_for_panes_command(targets: &str, timeout: Duration) -> Result<String> {
+    let interval_nanos = STOP_POLL_INTERVAL.as_nanos();
+    let Ok(polls) = i64::try_from(timeout.as_nanos() / interval_nanos) else {
+        bail!("stop timeout is too large");
+    };
+    let remainder = Duration::from_nanos((timeout.as_nanos() % interval_nanos) as u64);
+
+    Ok(format!(
+        "stop_polls={polls}; \
+         while :; do \
+           stop_running=0; \
+           for pane_id in {targets}; do \
+             if [ \"$(tmux display-message -p -t \"$pane_id\" '#{{pane_dead}}' 2>/dev/null || true)\" != 1 ]; then \
+               stop_running=1; break; \
+             fi; \
+           done; \
+           [ \"$stop_running\" = 1 ] || break; \
+           if [ \"$stop_polls\" -eq 0 ]; then sleep {}; break; fi; \
+           sleep {}; stop_polls=$((stop_polls - 1)); \
+         done",
+        sleep_duration(remainder),
+        sleep_duration(STOP_POLL_INTERVAL),
+    ))
 }
 
 fn last_log_lines(output: &str, count: usize) -> String {

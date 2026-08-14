@@ -9,6 +9,7 @@ use crate::model::{
 };
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
+use std::thread;
 
 pub fn up_selected(
     backend: &impl Backend,
@@ -125,12 +126,36 @@ pub fn recreate(
     }
 }
 
-pub fn down(backend: &impl Backend, project: &Project) -> Result<OperationReport> {
+pub fn down(backend: &(impl Backend + Sync), project: &Project) -> Result<OperationReport> {
     validate_desired_hosts(project, None)?;
+    let results = thread::scope(|scope| {
+        project
+            .hosts
+            .values()
+            .map(|host| {
+                scope.spawn(move || {
+                    (
+                        host,
+                        backend.stop_project(
+                            host,
+                            &project.name,
+                            max_stop_timeout(project, &host.name),
+                        ),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            })
+            .collect::<Vec<_>>()
+    });
     let mut report = OperationReport::new();
 
-    for host in project.hosts.values() {
-        match backend.stop_project(host, &project.name, max_stop_timeout(project, &host.name)) {
+    for (host, result) in results {
+        match result {
             Ok(()) => report.push(Outcome::Stopped {
                 host: host.name.clone(),
                 service: None,

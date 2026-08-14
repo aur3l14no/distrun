@@ -552,6 +552,58 @@ services:
 }
 
 #[test]
+fn down_times_out_a_hung_host_and_reports_reachable_hosts() {
+    let test = TestEnv::new();
+    let host_log = test.root.join("hosts.log");
+    let remote_started = test.root.join("remote-started");
+    let local_done = test.root.join("local-done");
+    let overlap = test.root.join("overlap");
+    write_host_scope_probe(&test.bin);
+    write_slow_ssh(&test.bin);
+    let config_path = test.write(
+        "distrun.yml",
+        r#"project: demo
+hosts:
+  edge:
+    ssh: edge-target
+services:
+  remote:
+    host: edge
+    cmd: sleep 60
+    stop_timeout: 0ms
+  local:
+    cmd: sleep 60
+    stop_timeout: 0ms
+"#,
+    );
+
+    let started = Instant::now();
+    let output = test.run_with_env(
+        &["-f", path(&config_path), "down"],
+        &[
+            ("DISTRUN_FAKE_HOST_LOG", path(&host_log)),
+            ("DISTRUN_FAKE_REMOTE_STARTED", path(&remote_started)),
+            ("DISTRUN_FAKE_LOCAL_DONE", path(&local_done)),
+            ("DISTRUN_FAKE_OVERLAP", path(&overlap)),
+        ],
+    );
+
+    assert_failure(&output);
+    assert!(started.elapsed() < Duration::from_secs(8));
+    assert_eq!(stdout(&output), "local stopped\n");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("edge stop failed"), "{stderr}");
+    assert!(stderr.contains("project stop failed"), "{stderr}");
+    assert!(stderr.contains("command timed out"), "{stderr}");
+    assert!(stderr.contains("error: 1 operation(s) failed"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(host_log).expect("read host log"),
+        "local\n"
+    );
+    assert!(overlap.exists(), "host stops did not overlap");
+}
+
+#[test]
 fn hosts_file_down_uses_only_selected_aliases() {
     let test = TestEnv::new();
     let host_log = test.root.join("hosts.log");
@@ -716,6 +768,39 @@ fn exited_keeper_lifecycle_commands_do_not_wait_for_stop_timeout() {
             "keeper pane must not receive an interrupt: {args:?}"
         );
     }
+}
+
+#[test]
+fn unknown_pane_state_does_not_skip_the_stop_grace_period() {
+    let test = TestEnv::new();
+    let tmux_log = test.root.join("tmux.log");
+    let sleep_log = test.root.join("sleep.log");
+    let state_probe = test.root.join("state-probed");
+    write_lifecycle_tmux(&test.bin);
+    install_shell_script(
+        &test.bin,
+        "sleep",
+        "printf '%s\\n' \"$1\" >> \"$DISTRUN_FAKE_SLEEP_LOG\"\n",
+    );
+    let config_path = test.write(
+        "distrun.yml",
+        "project: demo\nservices:\n  api:\n    cmd: sleep 60\n    stop_timeout: 75ms\n",
+    );
+
+    let output = test.run_with_env(
+        &["-f", path(&config_path), "stop", "api"],
+        &[
+            ("DISTRUN_FAKE_TMUX_LOG", path(&tmux_log)),
+            ("DISTRUN_FAKE_SLEEP_LOG", path(&sleep_log)),
+            ("DISTRUN_FAKE_PANE_STATE_ERROR", path(&state_probe)),
+        ],
+    );
+
+    assert_stdout(&output, "local api stopped\n");
+    assert_eq!(
+        fs::read_to_string(sleep_log).expect("read grace sleeps"),
+        "0.05\n0.025\n"
+    );
 }
 
 #[test]
@@ -1466,7 +1551,7 @@ fn tui_requires_interactive_terminal() {
 }
 
 #[test]
-fn real_tmux_up_starts_a_project_on_a_fresh_server() {
+fn real_tmux_lifecycle_works_on_a_fresh_server_without_fixed_stop_delays() {
     let Some((dir, socket_dir)) = cold_tmux_environment() else {
         return;
     };
@@ -1493,10 +1578,30 @@ fn real_tmux_up_starts_a_project_on_a_fresh_server() {
     .expect("check newly created project session");
     assert_success(&present);
 
+    let stop_started = Instant::now();
+    let stop = real_distrun_command(&["-p", &project, "stop", "api"], &dir, &socket_dir)
+        .output()
+        .expect("stop service on the fresh tmux server");
+    assert_stdout(&stop, "local api stopped\n");
+    assert!(
+        stop_started.elapsed() < Duration::from_secs(4),
+        "stop waited for its ten-second grace period"
+    );
+
+    let restarted = real_distrun_command(&["-f", path(&config_path), "up"], &dir, &socket_dir)
+        .output()
+        .expect("restart service on the fresh tmux server");
+    assert_stdout(&restarted, "local api started\n");
+
+    let down_started = Instant::now();
     let down = real_distrun_command(&["-p", &project, "down"], &dir, &socket_dir)
         .output()
         .expect("clean up cold-start project");
     assert_stdout(&down, "local stopped\n");
+    assert!(
+        down_started.elapsed() < Duration::from_secs(4),
+        "down waited for its ten-second grace period"
+    );
 
     let repeated_down = real_distrun_command(&["-p", &project, "down"], &dir, &socket_dir)
         .output()
@@ -1903,6 +2008,14 @@ fn write_host_scope_probe(bin_dir: &Path) {
         bin_dir,
         r#"case "$1" in
     new-session)
+        if [ -n "$DISTRUN_FAKE_REMOTE_STARTED" ]; then
+            attempt=0
+            while [ ! -f "$DISTRUN_FAKE_REMOTE_STARTED" ] && [ "$attempt" -lt 100 ]; do
+                sleep 0.01
+                attempt=$((attempt + 1))
+            done
+            : > "$DISTRUN_FAKE_LOCAL_DONE"
+        fi
         printf '%s\n' "${DISTRUN_FAKE_REMOTE:-local}" >> "$DISTRUN_FAKE_HOST_LOG"
         exit 0
         ;;
@@ -2326,7 +2439,15 @@ case "$1" in
     display-message)
         case "$*" in
             *pane_pipe*) printf '1\n' ;;
-            *pane_dead*) printf '1\n' ;;
+            *pane_dead*)
+                if [ -n "$DISTRUN_FAKE_PANE_STATE_ERROR" ]; then
+                    [ -f "$DISTRUN_FAKE_PANE_STATE_ERROR" ] && exit 47
+                    : > "$DISTRUN_FAKE_PANE_STATE_ERROR"
+                    printf '0\n'
+                    exit 0
+                fi
+                printf '1\n'
+                ;;
             *%1*) printf '%s\n' 'distrun/demo|@1|%1|api|' ;;
             *%2*) printf '%s\n' 'distrun/demo|@2|%2|worker|' ;;
             *%3*) printf '%s\n' 'distrun/demo|@3|%3|old-worker|' ;;
@@ -2408,7 +2529,18 @@ exit 0
 fn write_slow_ssh(bin_dir: &Path) {
     install_ssh(
         bin_dir,
-        r#"sleep 10
+        r#"if [ -n "$DISTRUN_FAKE_REMOTE_STARTED" ]; then
+    : > "$DISTRUN_FAKE_REMOTE_STARTED"
+    attempt=0
+    while [ ! -f "$DISTRUN_FAKE_LOCAL_DONE" ] && [ "$attempt" -lt 100 ]; do
+        sleep 0.01
+        attempt=$((attempt + 1))
+    done
+    if [ -f "$DISTRUN_FAKE_LOCAL_DONE" ]; then
+        : > "$DISTRUN_FAKE_OVERLAP"
+    fi
+fi
+sleep 10
 "#,
     );
 }
