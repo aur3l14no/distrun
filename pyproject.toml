@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "distrun"
+version = "0.1.0"
+description = "A library and CLI for small process stacks across local and SSH hosts"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6,<7", "rich>=13,<15"]
+
+[project.scripts]
+distrun = "distrun.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.11", "mypy>=1.15", "types-PyYAML>=6"]
+
+[tool.pytest.ini_options]
+testpaths = ["distrun"]
+addopts = "-ra"
+markers = ["ssh: real SSH tests, explicitly enabled with --ssh-target"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["distrun"]
+exclude = ["**/test_*.py", "**/conftest.py"]

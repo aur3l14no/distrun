@@ -1,9 +1,8 @@
-# Agent Guide
+# distrun contributor guide
 
-## Rules
-
-- Test user-facing behavior. Prefer integration tests.
-- Use unit tests only for complex logic.
-- When changing behavior from A to B, test B directly. Do not test that A is gone.
-- Avoid calling current behavior `v1` in user-facing docs; reserve version labels for roadmap sections.
-- Weigh alternatives, then recommend one best overall solution; do not turn fallback options into the plan.
+- distrun is application-independent. Keep application names, protocols, and control policies out of its code; use cases may link to consumers.
+- Use uv for dependencies and commands. Read AGENTS.local.md when present.
+- CLI and SDK use the same lifecycle implementation. A process has one lifecycle owner.
+- Prefer real end-to-end behavior tests next to their owning module. Unit tests are reserved for tricky local algorithms. Always clean processes, sessions, and files in fixtures, including on failure.
+- Keep transport, host execution, orchestration, configuration, and presentation separate. Do not add plugin frameworks or compatibility paths without a consumer.
+- Document externally visible lifecycle guarantees and limitations in docs/architecture.md.

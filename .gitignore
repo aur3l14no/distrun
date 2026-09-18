@@ -1,2 +1,9 @@
-/target
-/.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+AGENTS.local.md
+justfile.local
