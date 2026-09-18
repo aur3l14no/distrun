@@ -1,8 +1,6 @@
 # distrun contributor guide
 
-- Keep application names, protocols, and control policies out of distrun code; use cases may link to consumers.
-- Use uv. Read AGENTS.local.md for local setup.
-- CLI and SDK share lifecycle implementation; each process has one lifecycle owner.
-- Put real E2E tests beside their module; reserve unit tests for tricky algorithms.
-- Add plugin frameworks or compatibility paths only for an existing consumer.
+- Keep application-specific names, protocols, and control policies out of distrun code; use cases may link to consumers.
+- Use uv. Read AGENTS.local.md when present.
+- Keep tests beside the code they cover. Use real E2E tests; reserve unit tests ONLY for tricky local algorithms.
 - Record public lifecycle guarantees and limitations in docs/architecture.md.
