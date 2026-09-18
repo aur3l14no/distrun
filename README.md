@@ -14,11 +14,14 @@ its source and documentation remain on the
 the final Rust version preserved at
 [v0.2.3](https://github.com/aur3l14no/distrun/tree/v0.2.3).
 
-The implementations use different runtime layouts. Before switching, use the
-Rust CLI to stop existing services on every affected host, then start them with
-the Python CLI. Python does not adopt or clean up Rust-managed services. Review
-the [migration guide](docs/e2e-migration.md) for behavior differences and the
-requirements below before reusing a configuration.
+Before switching, use the Rust CLI to stop existing services on every affected
+host, then start them with the Python CLI; the runtime layouts differ.
+
+The existing YAML field names are retained. Python rejects unknown fields,
+multiple aliases for the same SSH target, and repeated includes that duplicate
+host or service definitions. Remove unused fields and consolidate those aliases
+and includes if present. `stop_timeout` must be positive and now defaults to
+3 seconds; set `stop_timeout: 10s` to retain the Rust default.
 
 ## Install
 
@@ -202,8 +205,7 @@ Tests own unique tmux namespaces and temporary directories on every selected hos
 Explicit SSH tests fail if their requirements are missing; the ordinary gate
 excludes SSH tests unless requested.
 
-See [architecture and lifecycle guarantees](docs/architecture.md) and the
-[Rust E2E migration map](docs/e2e-migration.md).
+See [architecture and lifecycle guarantees](docs/architecture.md).
 
 ## License
 

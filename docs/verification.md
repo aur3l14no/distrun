@@ -22,10 +22,6 @@ service directories, SSH daemon/connection, credentials, and smoke-test files we
 cleaned up. The temporary remote checkout was removed after copying the lockfile
 and build artifacts to the local repository.
 
-The Rust E2E behavior mapping and intentional differences are recorded in
-[e2e-migration.md](e2e-migration.md). This is not a claim that the Rust test binary
-or its exact output snapshots ran against the Python executable.
-
 ## Composed-project CLI follow-up
 
 The public `run_cli(Project, argv)` entry was exercised by an application-provided
