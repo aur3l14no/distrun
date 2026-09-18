@@ -143,15 +143,3 @@ Each follower owns its read offset. An exited pane retains its log until explici
 stop/down. Successful stop removes that log; failed stop does not discard evidence.
 Log rotation/quotas are not implemented; keep long-lived service output bounded or
 use application-managed logging.
-
-## Deliberate differences from the Rust CLI
-
-The YAML vocabulary and major commands remain familiar, but there is no binary
-compatibility or old tmux metadata migration. This version uses one session per
-service and direct log files. Rich provides a read-only live status display,
-without the old TUI's full navigation/detail feature set. Structured JSON output
-and the Python API are the automation interfaces.
-
-OpenSSH is retained instead of reimplementing SSH config and ProxyJump in a Python
-SSH client. PyYAML and Rich handle configuration parsing and terminal presentation.
-The package needs no Rust binary and no service-specific SDK dependencies.

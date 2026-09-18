@@ -1,8 +1,8 @@
 # distrun contributor guide
 
-- distrun is application-independent. Keep application names, protocols, and control policies out of its code; use cases may link to consumers.
-- Use uv for dependencies and commands. Read AGENTS.local.md when present.
-- CLI and SDK use the same lifecycle implementation. A process has one lifecycle owner.
-- Prefer real end-to-end behavior tests next to their owning module. Unit tests are reserved for tricky local algorithms. Always clean processes, sessions, and files in fixtures, including on failure.
-- Keep transport, host execution, orchestration, configuration, and presentation separate. Do not add plugin frameworks or compatibility paths without a consumer.
-- Document externally visible lifecycle guarantees and limitations in docs/architecture.md.
+- Keep application names, protocols, and control policies out of distrun code; use cases may link to consumers.
+- Use uv. Read AGENTS.local.md for local setup.
+- CLI and SDK share lifecycle implementation; each process has one lifecycle owner.
+- Put real E2E tests beside their module; reserve unit tests for tricky algorithms.
+- Add plugin frameworks or compatibility paths only for an existing consumer.
+- Record public lifecycle guarantees and limitations in docs/architecture.md.

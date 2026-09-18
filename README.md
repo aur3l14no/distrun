@@ -5,24 +5,6 @@ The two interfaces share one orchestration library. Services run in isolated tmu
 sessions; SSH hosts need Python 3.11+ and tmux, but no installed distrun package or
 persistent Python agent.
 
-## Rust to Python transition
-
-The default branch now contains the Python implementation and is the focus of
-future development. The Rust implementation is no longer actively maintained;
-its source and documentation remain on the
-[rust-legacy branch](https://github.com/aur3l14no/distrun/tree/rust-legacy), with
-the final Rust version preserved at
-[v0.2.3](https://github.com/aur3l14no/distrun/tree/v0.2.3).
-
-Before switching, use the Rust CLI to stop existing services on every affected
-host, then start them with the Python CLI; the runtime layouts differ.
-
-The existing YAML field names are retained. Python rejects unknown fields,
-multiple aliases for the same SSH target, and repeated includes that duplicate
-host or service definitions. Remove unused fields and consolidate those aliases
-and includes if present. `stop_timeout` must be positive and now defaults to
-3 seconds; set `stop_timeout: 10s` to retain the Rust default.
-
 ## Install
 
 ```sh

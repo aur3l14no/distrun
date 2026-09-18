@@ -34,9 +34,9 @@ support OpenSSH private keys; the workspace mount does not preserve those modes.
 Startup errors now retain the exited service's exit code and last 40 log lines
 before scoped rollback removes owned resources.
 
-## Python mainline migration — 2026-09-18
+## Verification — 2026-09-18
 
-Verified the Python mainline on Linux with Python 3.11.15 and tmux 3.6, using
+Verified on Linux with Python 3.11.15 and tmux 3.6, using
 the locked dependencies:
 
 - `uv run --locked pytest -q --ssh-local`: **56 passed**, 34.50 seconds,
